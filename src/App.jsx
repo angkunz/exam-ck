@@ -8,21 +8,21 @@ export default function App() {
   
   // Camera & Auto-Scan State
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const [stream, setStream] = useState(null);
   const [imageSource, setImageSource] = useState(null); 
   const [isProcessing, setIsProcessing] = useState(false);
   const [cameraError, setCameraError] = useState('');
   
-  // Auto-Scan refs
+  // Refs
   const isProcessingRef = useRef(false);
   const answerKeyRef = useRef(answerKey);
   const animationFrameId = useRef(null);
   const stableFramesCount = useRef(0);
+  const isStartingCamera = useRef(false);
   
-  // 6 จุดขอบด้านนอก: ซ้ายบน, ขวาบน, ซ้ายกลาง, ขวากลาง, ซ้ายล่าง, ขวาล่าง
-  const [alignedStatus, setAlignedStatus] = useState({ tl: false, tr: false, ml: false, mr: false, bl: false, br: false });
+  // สถานะ 4 มุม (ใช้สำหรับแสดงผลกรอบบนหน้าจอ)
+  const [alignedStatus, setAlignedStatus] = useState({ tl: false, tr: false, bl: false, br: false });
 
   // Result State
   const [scanResult, setScanResult] = useState(null);
@@ -33,7 +33,150 @@ export default function App() {
   useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
   useEffect(() => { answerKeyRef.current = answerKey; }, [answerKey]);
 
-  // ฟังก์ชันแยกสำหรับถ่ายภาพและนำไปประมวลผล (ใช้ได้ทั้ง Auto และ Manual)
+  // --- เริ่มต้นกล้องอัตโนมัติเมื่ออยู่หน้าสแกน ---
+  const startCamera = async () => {
+    if (isStartingCamera.current) return;
+    isStartingCamera.current = true;
+    setCameraError('');
+    try {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      const newStream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1920 } } 
+      });
+      setStream(newStream);
+      setImageSource('camera');
+      setActiveTab('scan');
+    } catch (err) {
+      console.error(err);
+      setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้งานกล้อง");
+    } finally {
+      isStartingCamera.current = false;
+    }
+  };
+
+  const stopCamera = () => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+    }
+    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+  };
+
+  useEffect(() => {
+    if (activeTab === 'scan' && !stream && imageSource !== 'file') {
+      startCamera();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    return () => stopCamera();
+  }, [stream]);
+
+  // --- ฟังก์ชันค้นหาจุดอ้างอิง 4 มุม (หาจุดศูนย์กลางของสีดำ) ---
+  const extractMarkers = (ctx, w, h) => {
+    const data = ctx.getImageData(0, 0, w, h).data;
+    
+    // ค้นหาในพื้นที่ที่กำหนด แล้วหาพิกัดเฉลี่ยของพิกเซลที่ดำที่สุด
+    const getMarker = (xPct, yPct, wPct, hPct) => {
+      const sx = Math.floor(xPct * w);
+      const sy = Math.floor(yPct * h);
+      const ew = Math.floor(wPct * w);
+      const eh = Math.floor(hPct * h);
+      
+      let sumX = 0, sumY = 0, count = 0;
+      
+      // Step by 2 เพื่อให้ประมวลผลเร็วขึ้น
+      for (let y = sy; y < sy + eh; y += 2) {
+        for (let x = sx; x < sx + ew; x += 2) {
+          const i = (y * w + x) * 4;
+          const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+          if (gray < 90) { // เกณฑ์ความดำของสี่เหลี่ยมมุม
+            sumX += x; 
+            sumY += y; 
+            count++;
+          }
+        }
+      }
+      // ถ้าพบกลุ่มก้อนสีดำใหญ่พอ (ประมาณ 1.5% ของพื้นที่ค้นหา)
+      if (count > (ew * eh * 0.015) / 4) {
+        return { x: sumX / count, y: sumY / count }; // คืนค่าพิกัดจุดศูนย์กลางที่แท้จริง
+      }
+      return null;
+    };
+
+    // ค้นหา 4 มุม ในรัศมี 35% ของแต่ละมุม (พื้นที่กว้างมาก วางเบี้ยวได้สบาย)
+    return {
+      tl: getMarker(0.0, 0.0, 0.35, 0.35),
+      tr: getMarker(0.65, 0.0, 0.35, 0.35),
+      bl: getMarker(0.0, 0.65, 0.35, 0.35),
+      br: getMarker(0.65, 0.65, 0.35, 0.35)
+    };
+  };
+
+  // --- Auto Scan Loop ---
+  const checkAlignmentAndScan = useCallback(() => {
+    if (!videoRef.current || isProcessingRef.current || !stream) {
+      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+      return;
+    }
+
+    const video = videoRef.current;
+    if (video.readyState !== 4) {
+      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+      return;
+    }
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    // ความละเอียดลดลงครึ่งหนึ่งเพื่อความรวดเร็วในการจับภาพสด
+    canvas.width = 300;
+    canvas.height = 400; 
+
+    const vW = video.videoWidth;
+    const vH = video.videoHeight;
+    const vRatio = vW / vH;
+    const targetRatio = canvas.width / canvas.height;
+
+    let sX = 0, sY = 0, sW = vW, sH = vH;
+    if (vRatio > targetRatio) {
+      sW = vH * targetRatio;
+      sX = (vW - sW) / 2;
+    } else {
+      sH = vW / targetRatio;
+      sY = (vH - sH) / 2;
+    }
+
+    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
+    
+    // ตรวจหาจุด 4 มุม
+    const markers = extractMarkers(ctx, canvas.width, canvas.height);
+    
+    setAlignedStatus({
+      tl: !!markers.tl,
+      tr: !!markers.tr,
+      bl: !!markers.bl,
+      br: !!markers.br
+    });
+
+    if (markers.tl && markers.tr && markers.bl && markers.br) {
+      stableFramesCount.current++;
+      // นิ่งแค่ 5 เฟรม ก็ถ่ายเลย เพราะระบบมีความแม่นยำสูงแล้ว
+      if (stableFramesCount.current > 5 && !answerKeyRef.current.includes(null)) {
+        stableFramesCount.current = 0;
+        captureAndProcess(); 
+        return; 
+      }
+    } else {
+      stableFramesCount.current = 0;
+    }
+
+    animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+  }, [stream]);
+
+  // ฟังก์ชันถ่ายภาพและประมวลผล
   const captureAndProcess = useCallback(() => {
     if (!videoRef.current || isProcessingRef.current) return;
     
@@ -41,7 +184,7 @@ export default function App() {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     
-    // ปรับสัดส่วน Canvas ใหม่เป็น 3:4 (ครอปหัวกระดาษออก ภาพซูมใหญ่ขึ้น)
+    // ตอนประมวลผลจริง ใช้ความละเอียดสูง
     canvas.width = 600;
     canvas.height = 800; 
 
@@ -61,99 +204,16 @@ export default function App() {
 
     ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/jpeg');
-    processImageInternal(dataUrl, canvas.width, canvas.height, ctx);
-  }, []);
-
-  // --- Auto Scan Loop (6 Points Outer Edges) ---
-  const checkAlignmentAndScan = useCallback(() => {
-    if (!videoRef.current || isProcessingRef.current || !stream) {
-      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-      return;
-    }
-
-    const video = videoRef.current;
-    if (video.readyState !== 4) {
-      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-      return;
-    }
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     
-    // สัดส่วน 3:4 สำหรับวิเคราะห์จุด
-    canvas.width = 300;
-    canvas.height = 400; 
-
-    const vW = video.videoWidth;
-    const vH = video.videoHeight;
-    const vRatio = vW / vH;
-    const targetRatio = canvas.width / canvas.height;
-
-    let sX = 0, sY = 0, sW = vW, sH = vH;
-    if (vRatio > targetRatio) {
-      sW = vH * targetRatio;
-      sX = (vW - sW) / 2;
+    // หาจุดอ้างอิงบนภาพความละเอียดสูง
+    const markers = extractMarkers(ctx, canvas.width, canvas.height);
+    
+    if (markers.tl && markers.tr && markers.bl && markers.br) {
+      processImageInternal(dataUrl, canvas.width, canvas.height, ctx, markers);
     } else {
-      sH = vW / targetRatio;
-      sY = (vH - sH) / 2;
+      alert("ไม่พบจุดอ้างอิงมุมสีดำทั้ง 4 จุด โปรดให้ทั้ง 4 มุมอยู่ในกรอบภาพแล้วลองใหม่");
     }
-
-    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-
-    const isDark = (xPct, yPct, wPct, hPct) => {
-      const x = Math.floor(xPct * canvas.width);
-      const y = Math.floor(yPct * canvas.height);
-      const w = Math.floor(wPct * canvas.width);
-      const h = Math.floor(hPct * canvas.height);
-      
-      let darkPixels = 0;
-      let totalPixels = 0;
-
-      for (let i = y; i < y + h; i++) {
-        for (let j = x; j < x + w; j++) {
-          if (j >= 0 && j < canvas.width && i >= 0 && i < canvas.height) {
-            const index = (i * canvas.width + j) * 4;
-            const gray = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
-            if (gray < 110) darkPixels++; 
-            totalPixels++;
-          }
-        }
-      }
-      return (darkPixels / totalPixels) > 0.20; 
-    };
-
-    // เช็คจุดขอบด้านนอกซ้าย-ขวา 6 จุด (ศูนย์กลางอยู่ที่ x=8%, x=92%, y=8%, y=50%, y=92%)
-    const status = {
-      tl: isDark(0.08 - 0.04, 0.08 - 0.03, 0.08, 0.06), // บนซ้าย
-      tr: isDark(0.92 - 0.04, 0.08 - 0.03, 0.08, 0.06), // บนขวา
-      ml: isDark(0.08 - 0.04, 0.50 - 0.03, 0.08, 0.06), // กลางซ้าย
-      mr: isDark(0.92 - 0.04, 0.50 - 0.03, 0.08, 0.06), // กลางขวา
-      bl: isDark(0.08 - 0.04, 0.92 - 0.03, 0.08, 0.06), // ล่างซ้าย
-      br: isDark(0.92 - 0.04, 0.92 - 0.03, 0.08, 0.06), // ล่างขวา
-    };
-
-    setAlignedStatus(status);
-
-    // ให้อนุโลมตรงแค่ 5 ใน 6 จุด ก็ถือว่าตรงแล้ว (เผื่อแสงเงาบัง 1 จุด)
-    const alignedCount = Object.values(status).filter(Boolean).length;
-    const isAligned = alignedCount >= 5;
-
-    if (isAligned) {
-      stableFramesCount.current++;
-      // นิ่งแค่ 8 เฟรม (เร็วมาก) ให้ถ่ายเลย
-      if (stableFramesCount.current > 8 && !answerKeyRef.current.includes(null)) {
-        stableFramesCount.current = 0;
-        captureAndProcess(); 
-        return; 
-      }
-    } else {
-      stableFramesCount.current = 0;
-    }
-
-    animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-  }, [stream, captureAndProcess]);
+  }, []);
 
   useEffect(() => {
     if (imageSource === 'camera' && stream && videoRef.current) {
@@ -170,34 +230,8 @@ export default function App() {
     };
   }, [imageSource, stream, checkAlignmentAndScan]);
 
-  const startCamera = async () => {
-    setCameraError('');
-    try {
-      if (stream) stream.getTracks().forEach(track => track.stop());
-      const newStream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1920 } } 
-      });
-      setStream(newStream);
-      setImageSource('camera');
-      setActiveTab('scan');
-    } catch (err) {
-      setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้งาน หรือใช้งานผ่าน HTTPS");
-    }
-  };
-
-  const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
-    }
-    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
-  };
-
-  useEffect(() => {
-    return () => stopCamera();
-  }, [stream]);
-
-  const processImageInternal = (sourceUrl, canvasWidth, canvasHeight, ctx) => {
+  // --- OMR Logic ด้วย Bilinear Interpolation ---
+  const processImageInternal = (sourceUrl, canvasWidth, canvasHeight, ctx, markers) => {
     setIsProcessing(true);
     setScanResult(null);
     setScannedImageUrl(sourceUrl);
@@ -209,32 +243,48 @@ export default function App() {
       return;
     }
 
+    // ฟังก์ชันช่วยหาตำแหน่งสมมติ (x, y) จากพิกัดเปอร์เซ็นต์ u, v โดยอิงจากจุด 4 มุมของจริง
+    const getInterpolatedPoint = (u, v) => {
+      const topX = markers.tl.x + (markers.tr.x - markers.tl.x) * u;
+      const topY = markers.tl.y + (markers.tr.y - markers.tl.y) * u;
+      const botX = markers.bl.x + (markers.br.x - markers.bl.x) * u;
+      const botY = markers.bl.y + (markers.br.y - markers.bl.y) * u;
+
+      const x = topX + (botX - topX) * v;
+      const y = topY + (botY - topY) * v;
+      return { x, y };
+    };
+
     const analyzePixels = () => {
       const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
       const data = imageData.data;
 
-      const checkBubble = (xPct, yPct, wPct, hPct) => {
-        const x = Math.floor(xPct * canvasWidth);
-        const y = Math.floor(yPct * canvasHeight);
-        const w = Math.floor(wPct * canvasWidth);
-        const h = Math.floor(hPct * canvasHeight);
-        
+      // รัศมีในการตรวจจับความดำรอบๆ จุดศูนย์กลาง
+      const radius = Math.floor(canvasWidth * 0.018); 
+
+      const checkBubble = (u, v) => {
+        const center = getInterpolatedPoint(u, v);
         let darkPixels = 0;
         let totalPixels = 0;
 
-        for (let i = y; i < y + h; i++) {
-          for (let j = x; j < x + w; j++) {
+        for (let i = Math.floor(center.y - radius); i < center.y + radius; i++) {
+          for (let j = Math.floor(center.x - radius); j < center.x + radius; j++) {
             if (j >= 0 && j < canvasWidth && i >= 0 && i < canvasHeight) {
-              const index = (i * canvasWidth + j) * 4;
-              const gray = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
-              if (gray < 130) darkPixels++;
+              const idx = (i * canvasWidth + j) * 4;
+              const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+              if (gray < 130) darkPixels++; // ความไวในการอ่านรอยดินสอ
               totalPixels++;
             }
           }
         }
         return {
           darkness: totalPixels > 0 ? darkPixels / totalPixels : 0,
-          box: { x: xPct, y: yPct, w: wPct, h: hPct }
+          box: { // ใช้สำหรับวาดกรอบผลลัพธ์
+            x: (center.x - radius) / canvasWidth,
+            y: (center.y - radius) / canvasHeight,
+            w: (radius * 2) / canvasWidth,
+            h: (radius * 2) / canvasHeight
+          }
         };
       };
 
@@ -242,19 +292,19 @@ export default function App() {
       const detectedBoxes = Array(20).fill(null);
       let studentIdStr = "";
 
-      // พิกัดใหม่ที่คำนวณจากการครอปหัวกระดาษออก (ภาพซูมเข้า)
-      const leftColX = 0.204; 
-      const leftColY = 0.255; 
-      const colWidth = 0.0445; 
-      const rowHeight = 0.0437; 
+      // ค่าความสัมพันธ์ U, V อิงจากไฟล์กระดาษคำตอบที่ให้มา 
+      // (แม่นยำมากเพราะคำนวณจากระยะห่างระหว่างจุดอ้างอิง 4 มุมเสมอ)
+      const U_LEFT = 0.145; 
+      const V_START = 0.225; 
+      const U_STEP = 0.052; 
+      const V_STEP = 0.051; 
 
-      const rightColX = 0.505;
-      const rightColY = 0.255;
+      const U_RIGHT = 0.490;
 
-      const idX = 0.675;
-      const idY = 0.545;
-      const idColWidth = 0.0445;
-      const idRowHeight = 0.0396;
+      const U_ID = 0.730;
+      const V_ID = 0.550;
+      const U_ID_STEP = 0.053;
+      const V_ID_STEP = 0.046;
 
       // 1. ตรวจคำตอบ (Q1-20)
       for (let q = 0; q < 20; q++) {
@@ -263,15 +313,14 @@ export default function App() {
         let selectedBox = null;
         
         const isLeft = q < 15;
-        const baseX = isLeft ? leftColX : rightColX;
-        const baseY = isLeft ? leftColY + (q * rowHeight) : rightColY + ((q - 15) * rowHeight);
+        const baseU = isLeft ? U_LEFT : U_RIGHT;
+        const v = isLeft ? V_START + (q * V_STEP) : V_START + ((q - 15) * V_STEP);
 
         for (let opt = 0; opt < 5; opt++) {
-          const optX = baseX + (opt * colWidth);
-          // เล็กลงนิดนึงเพื่อหลีกเลี่ยงขอบวงกลม
-          const result = checkBubble(optX, baseY, colWidth * 0.75, rowHeight * 0.75);
+          const u = baseU + (opt * U_STEP);
+          const result = checkBubble(u, v);
           
-          if (result.darkness > maxDarkness && result.darkness > 0.12) { 
+          if (result.darkness > maxDarkness && result.darkness > 0.10) { // 10% คือเกณฑ์ขั้นต่ำของการฝน
             maxDarkness = result.darkness;
             selectedOption = opt;
             selectedBox = result.box;
@@ -286,12 +335,12 @@ export default function App() {
         let maxDarkness = 0;
         let selectedNumber = "?";
         
+        const u = U_ID + (digit * U_ID_STEP);
         for (let num = 0; num < 10; num++) {
-          const numX = idX + (digit * idColWidth);
-          const numY = idY + (num * idRowHeight);
+          const v = V_ID + (num * V_ID_STEP);
+          const result = checkBubble(u, v);
           
-          const result = checkBubble(numX, numY, idColWidth * 0.75, idRowHeight * 0.75);
-          if (result.darkness > maxDarkness && result.darkness > 0.12) {
+          if (result.darkness > maxDarkness && result.darkness > 0.10) {
             maxDarkness = result.darkness;
             selectedNumber = num.toString();
           }
@@ -340,15 +389,22 @@ export default function App() {
         img.onload = () => {
           const canvas = document.createElement('canvas');
           canvas.width = 600;
-          canvas.height = 800; // ใช้สัดส่วนใหม่
+          canvas.height = 800;
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
           
-          // ถ้าอัปโหลดรูปแบบเต็มใบ A4 มา ให้ตัดหัวกระดาษทิ้งอัตโนมัติ 16% เพื่อให้พิกัดตรงกับกล้อง
           const cropY = img.height * 0.16;
           const cropHeight = img.height * 0.84;
           
           ctx.drawImage(img, 0, cropY, img.width, cropHeight, 0, 0, canvas.width, canvas.height);
-          processImageInternal(canvas.toDataURL('image/jpeg'), canvas.width, canvas.height, ctx);
+          
+          const markers = extractMarkers(ctx, canvas.width, canvas.height);
+          if (markers.tl && markers.tr && markers.bl && markers.br) {
+            processImageInternal(canvas.toDataURL('image/jpeg'), canvas.width, canvas.height, ctx, markers);
+          } else {
+            alert("รูปภาพที่อัปโหลดไม่พบจุดอ้างอิง 4 มุมที่ชัดเจน");
+            setImageSource(null);
+            startCamera();
+          }
         };
         img.src = event.target.result;
       };
@@ -416,9 +472,9 @@ export default function App() {
   const renderScanTab = () => (
     <div className="p-4 sm:p-6 max-w-2xl mx-auto bg-white rounded-xl shadow-sm border border-gray-100 text-center">
       <h2 className="text-2xl font-bold text-gray-800 mb-2 flex items-center justify-center">
-        <ScanLine className="w-6 h-6 mr-2 text-indigo-600" />ระบบตรวจอัตโนมัติ 
+        <ScanLine className="w-6 h-6 mr-2 text-indigo-600" />ระบบตรวจอัตโนมัติ (AI อัจฉริยะ)
       </h2>
-      <p className="text-gray-500 mb-6 text-sm">เล็งสี่เหลี่ยมขอบซ้าย-ขวา ให้ตรงกับจุดสีแดงบนหน้าจอ<br/>(ระบบจะซูมข้ามหัวกระดาษ เพื่อให้อ่านแม่นยำขึ้น)</p>
+      <p className="text-gray-500 mb-6 text-sm">ไม่ต้องเล็งให้เป๊ะ! แค่ให้จุดสีดำ 4 มุม อยู่ภายในช่องสีแดงทั้ง 4 มุม<br/>(ระบบจะคำนวณและปรับความเอียงให้เองอัตโนมัติ)</p>
 
       {answerKey.includes(null) ? (
         <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-lg mb-6">
@@ -428,31 +484,29 @@ export default function App() {
         </div>
       ) : (
         <>
-          {/* เปลี่ยน Aspect Ratio เป็น 3/4 เพื่อครอปหัวกระดาษออก */}
           <div className="relative bg-gray-900 rounded-xl overflow-hidden shadow-inner max-w-sm mx-auto mb-6 aspect-[3/4] flex items-center justify-center">
             
             {imageSource === 'camera' && stream ? (
               <>
                 <video ref={videoRef} autoPlay playsInline muted className="absolute w-full h-full object-cover" />
                 
-                {/* 6 Alignment Guides Overlay ขอบซ้าย-ขวา */}
-                <div className="absolute inset-0 pointer-events-none">
-                  {/* กรอบซ้าย บน, กลาง, ล่าง */}
-                  <div className={`absolute top-[8%] left-[8%] w-10 h-8 -translate-x-1/2 -translate-y-1/2 border-2 transition-colors rounded-sm ${alignedStatus.tl ? 'border-green-500 bg-green-500/40' : 'border-red-500 bg-red-500/10'}`}></div>
-                  <div className={`absolute top-[50%] left-[8%] w-10 h-8 -translate-x-1/2 -translate-y-1/2 border-2 transition-colors rounded-sm ${alignedStatus.ml ? 'border-green-500 bg-green-500/40' : 'border-red-500 bg-red-500/10'}`}></div>
-                  <div className={`absolute top-[92%] left-[8%] w-10 h-8 -translate-x-1/2 -translate-y-1/2 border-2 transition-colors rounded-sm ${alignedStatus.bl ? 'border-green-500 bg-green-500/40' : 'border-red-500 bg-red-500/10'}`}></div>
-                  
-                  {/* กรอบขวา บน, กลาง, ล่าง */}
-                  <div className={`absolute top-[8%] left-[92%] w-10 h-8 -translate-x-1/2 -translate-y-1/2 border-2 transition-colors rounded-sm ${alignedStatus.tr ? 'border-green-500 bg-green-500/40' : 'border-red-500 bg-red-500/10'}`}></div>
-                  <div className={`absolute top-[50%] left-[92%] w-10 h-8 -translate-x-1/2 -translate-y-1/2 border-2 transition-colors rounded-sm ${alignedStatus.mr ? 'border-green-500 bg-green-500/40' : 'border-red-500 bg-red-500/10'}`}></div>
-                  <div className={`absolute top-[92%] left-[92%] w-10 h-8 -translate-x-1/2 -translate-y-1/2 border-2 transition-colors rounded-sm ${alignedStatus.br ? 'border-green-500 bg-green-500/40' : 'border-red-500 bg-red-500/10'}`}></div>
+                {/* 4 โซนตีกรอบกว้างๆ ให้ผู้ใช้เล็งเข้าไป */}
+                <div className="absolute inset-0 pointer-events-none p-4">
+                  {/* กล่องซ้ายบน */}
+                  <div className={`absolute top-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tl ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  {/* กล่องขวาบน */}
+                  <div className={`absolute top-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tr ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  {/* กล่องซ้ายล่าง */}
+                  <div className={`absolute bottom-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.bl ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  {/* กล่องขวาล่าง */}
+                  <div className={`absolute bottom-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.br ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
                 </div>
 
                 <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 z-20">
                   <button 
                     onClick={captureAndProcess} 
                     className="bg-white/90 text-indigo-600 rounded-full p-4 shadow-xl border-4 border-indigo-200 hover:bg-white transition-all transform active:scale-95"
-                    title="ถ่ายรูปเอง"
+                    title="บังคับถ่ายรูป"
                   >
                     <CameraIcon size={32} />
                   </button>
@@ -461,31 +515,29 @@ export default function App() {
                 {isProcessing && (
                   <div className="absolute inset-0 bg-indigo-900/80 flex flex-col items-center justify-center z-30 backdrop-blur-sm">
                     <RefreshCw className="w-12 h-12 text-white animate-spin mb-4" />
-                    <p className="text-white font-bold text-lg">กำลังประมวลผล...</p>
+                    <p className="text-white font-bold text-lg">กำลังประมวลผลกระดาษ...</p>
                   </div>
                 )}
               </>
             ) : (
               <div className="text-gray-400 flex flex-col items-center">
                 <CameraIcon className="w-16 h-16 mb-4 opacity-50" />
-                <p>กดปุ่มเปิดกล้องด้านล่าง</p>
+                <p>เปิดกล้องไม่สำเร็จ หรือถูกปิดไป</p>
+                <button onClick={startCamera} className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg">เปิดกล้องใหม่</button>
               </div>
             )}
           </div>
 
           <div className="flex flex-col sm:flex-row justify-center space-y-3 sm:space-y-0 sm:space-x-4">
-            {imageSource !== 'camera' && (
-              <button onClick={startCamera} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg shadow-md transition flex items-center justify-center">
-                <CameraIcon className="w-5 h-5 mr-2" />เปิดกล้อง (Auto-Scan)
-              </button>
-            )}
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <input type="file" accept="image/*" ref={fileInputRef} onChange={handleManualUpload} className="hidden" />
               <button onClick={() => fileInputRef.current.click()} className="w-full bg-white border-2 border-gray-300 hover:bg-gray-50 text-gray-700 font-bold py-3 px-8 rounded-lg transition flex items-center justify-center">
-                <Upload className="w-5 h-5 mr-2" />อัปโหลดรูปภาพ
+                <Upload className="w-5 h-5 mr-2" />อัปโหลดจากเครื่อง
               </button>
             </div>
           </div>
+          
+          {cameraError && <p className="text-red-500 mt-4 text-sm">{cameraError}</p>}
         </>
       )}
     </div>
@@ -500,7 +552,7 @@ export default function App() {
           
           <div className="order-2 lg:order-1 flex flex-col items-center">
             <h3 className="font-bold text-lg text-gray-800 mb-4 flex items-center">
-              <ScanLine className="w-5 h-5 mr-2 text-indigo-600" /> ภาพที่ระบบสแกนได้
+              <ScanLine className="w-5 h-5 mr-2 text-indigo-600" /> ภาพที่ระบบอ่านได้
             </h3>
             <div className="relative border-2 border-gray-200 rounded-lg overflow-hidden max-w-sm w-full bg-gray-100 aspect-[3/4]">
               {scannedImageUrl && (
@@ -531,7 +583,7 @@ export default function App() {
                 </>
               )}
             </div>
-            <p className="text-xs text-gray-400 mt-2">* กรอบสีเขียวคือข้อที่ถูก กรอบสีแดงคือข้อที่ผิด</p>
+            <p className="text-xs text-gray-400 mt-2">* ระบบจำลองพิกัดอัตโนมัติตามความเอียงของกระดาษ</p>
           </div>
 
           <div className="order-1 lg:order-2">
@@ -559,7 +611,7 @@ export default function App() {
               ))}
             </div>
 
-            <button onClick={() => { startCamera(); }} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-8 rounded-lg shadow-md transition flex items-center justify-center text-lg">
+            <button onClick={() => { setActiveTab('scan'); startCamera(); }} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-8 rounded-lg shadow-md transition flex items-center justify-center text-lg">
               <CameraIcon className="w-6 h-6 mr-2" />สแกนแผ่นต่อไป
             </button>
           </div>
@@ -578,7 +630,7 @@ export default function App() {
           </div>
           <nav className="flex space-x-1 bg-indigo-700 p-1 rounded-lg text-sm">
             <button onClick={() => setActiveTab('keys')} className={`px-3 py-1.5 rounded-md transition ${activeTab === 'keys' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-100 hover:bg-indigo-600'}`}>เฉลย</button>
-            <button onClick={() => { setActiveTab('scan'); if(!stream) startCamera(); }} className={`px-3 py-1.5 rounded-md transition ${activeTab === 'scan' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-100 hover:bg-indigo-600'}`}>สแกน</button>
+            <button onClick={() => setActiveTab('scan')} className={`px-3 py-1.5 rounded-md transition ${activeTab === 'scan' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-100 hover:bg-indigo-600'}`}>สแกน</button>
             <button onClick={() => setActiveTab('results')} disabled={!scanResult} className={`px-3 py-1.5 rounded-md transition ${activeTab === 'results' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-300 opacity-50 cursor-not-allowed'}`}>ผลลัพธ์</button>
           </nav>
         </div>
