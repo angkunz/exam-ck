@@ -1,737 +1,761 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Camera, FileText, Settings, RefreshCw, Save, AlertCircle, ScanLine, Sliders, Map, LayoutGrid, ChevronRight, CheckCircle, Upload } from 'lucide-react';
+import { Camera, Key, History, Upload, CheckCircle, XCircle, AlertCircle, ChevronLeft, RefreshCw, Settings } from 'lucide-react';
 
 // ==========================================
-// การตั้งค่าบล็อกตารางเริ่มต้น (ปรับจูนใหม่ให้ตรงกับกระดาษของคุณ)
+// การตั้งค่าพิกัด OMR (อิงจากภาพกระดาษคำตอบ)
 // ==========================================
-const DEFAULT_BLOCKS = [
-  { id: 'q1_7', type: 'q', startQ: 1, endQ: 7, u: 0.160, v: 0.201, stepU: 0.059, stepV: 0.045 },
-  { id: 'q8_15', type: 'q', startQ: 8, endQ: 15, u: 0.160, v: 0.555, stepU: 0.059, stepV: 0.045 }, 
-  { id: 'q16_20', type: 'q', startQ: 16, endQ: 20, u: 0.534, v: 0.201, stepU: 0.059, stepV: 0.045 },
-  { id: 'student_id', type: 'id', digits: 5, u: 0.690, v: 0.510, stepU: 0.058, stepV: 0.045 } 
-];
-
-// ตำแหน่งของเป้าเล็งบนหน้าจอ (ใช้เป็น Fallback หากหาจุดไม่เจอ)
-const TARGET_ZONES = {
-  tl: { x: 0.10, y: 0.16, w: 0.15, h: 0.12 },
-  tr: { x: 0.90, y: 0.16, w: 0.15, h: 0.12 },
-  bl: { x: 0.10, y: 0.84, w: 0.15, h: 0.12 },
-  br: { x: 0.90, y: 0.84, w: 0.15, h: 0.12 }
+const getLayout = () => {
+  const q = [];
+  // คอลัมน์ซ้ายบน: ข้อ 1-7
+  for (let i = 0; i < 7; i++) {
+    q.push({ id: i + 1, startX: 0.135, stepX: 0.050, y: 0.181 + i * 0.0416 });
+  }
+  // คอลัมน์ซ้ายล่าง: ข้อ 8-15
+  for (let i = 0; i < 8; i++) {
+    q.push({ id: i + 8, startX: 0.135, stepX: 0.050, y: 0.587 + i * 0.0444 });
+  }
+  // คอลัมน์ขวาบน: ข้อ 16-20
+  for (let i = 0; i < 5; i++) {
+    q.push({ id: i + 16, startX: 0.454, stepX: 0.050, y: 0.181 + i * 0.0416 });
+  }
+  
+  // รหัสนักเรียน 5 หลัก
+  const sid = [];
+  for (let col = 0; col < 5; col++) {
+    const colArr = [];
+    for (let row = 0; row < 10; row++) {
+      colArr.push({
+        val: row,
+        x: 0.706 + col * 0.0542,
+        y: 0.530 + row * 0.0445
+      });
+    }
+    sid.push(colArr);
+  }
+  return { questions: q, studentId: sid };
 };
 
+const OPTIONS_TH = ['ก', 'ข', 'ค', 'ง', 'จ'];
+
+// ==========================================
+// คอมโพเนนต์หลักของแอป
+// ==========================================
 export default function App() {
-  const [activeTab, setActiveTab] = useState('scan'); 
-  
-  const [answerKey, setAnswerKey] = useState(() => {
-    const saved = localStorage.getItem('omr_answer_key');
-    return saved ? JSON.parse(saved) : Array(20).fill(null);
-  });
-  
-  const [subjectName, setSubjectName] = useState(() => {
-    return localStorage.getItem('omr_subject_name') || 'วิชาการออกแบบและเทคโนโลยี';
-  });
-  
-  const updateAnswerKey = (newKeys) => {
-    setAnswerKey(newKeys);
-    answerKeyRef.current = newKeys; 
-    localStorage.setItem('omr_answer_key', JSON.stringify(newKeys));
+  const [activeTab, setActiveTab] = useState('grade'); // grade, key, history
+  const [answerKey, setAnswerKey] = useState({});
+  const [history, setHistory] = useState([]);
+
+  // สร้างเฉลยแบบสุ่มสำหรับทดสอบ (ถ้ายังไม่ได้ตั้ง)
+  useEffect(() => {
+    const initialKey = {};
+    for (let i = 1; i <= 20; i++) {
+      initialKey[i] = Math.floor(Math.random() * 5); // สุ่ม ก-จ
+    }
+    setAnswerKey(initialKey);
+  }, []);
+
+  const addHistory = (result) => {
+    setHistory(prev => [{ ...result, date: new Date().toISOString(), id: Date.now() }, ...prev]);
   };
 
-  const updateSubjectName = (val) => {
-    setSubjectName(val);
-    localStorage.setItem('omr_subject_name', val);
-  };
-  
-  const [cvReady, setCvReady] = useState(false);
+  return (
+    <div className="flex flex-col h-screen bg-gray-50 font-sans">
+      {/* Header */}
+      <header className="bg-indigo-600 text-white shadow-md pt-safe">
+        <div className="flex items-center justify-center p-4">
+          <h1 className="text-xl font-bold tracking-wide">OMR Grade (เวอร์ชันภาษาไทย)</h1>
+        </div>
+      </header>
+
+      {/* Main Content Area */}
+      <main className="flex-1 overflow-y-auto relative">
+        {activeTab === 'grade' && <ScannerTab answerKey={answerKey} onSaveResult={addHistory} />}
+        {activeTab === 'key' && <AnswerKeyTab answerKey={answerKey} setAnswerKey={setAnswerKey} />}
+        {activeTab === 'history' && <HistoryTab history={history} />}
+      </main>
+
+      {/* Bottom Navigation */}
+      <nav className="bg-white border-t border-gray-200 pb-safe shadow-[0_-2px_10px_rgba(0,0,0,0.05)]">
+        <div className="flex justify-around py-3">
+          <NavButton 
+            active={activeTab === 'grade'} 
+            icon={<Camera size={24} />} 
+            label="ตรวจข้อสอบ" 
+            onClick={() => setActiveTab('grade')} 
+          />
+          <NavButton 
+            active={activeTab === 'key'} 
+            icon={<Key size={24} />} 
+            label="เฉลย" 
+            onClick={() => setActiveTab('key')} 
+          />
+          <NavButton 
+            active={activeTab === 'history'} 
+            icon={<History size={24} />} 
+            label="ประวัติ" 
+            onClick={() => setActiveTab('history')} 
+          />
+        </div>
+      </nav>
+    </div>
+  );
+}
+
+const NavButton = ({ active, icon, label, onClick }) => (
+  <button 
+    onClick={onClick} 
+    className={`flex flex-col items-center gap-1 w-24 transition-colors ${active ? 'text-indigo-600' : 'text-gray-400 hover:text-gray-600'}`}
+  >
+    <div className={`${active ? 'scale-110' : 'scale-100'} transition-transform duration-200`}>
+      {icon}
+    </div>
+    <span className="text-[10px] font-medium">{label}</span>
+  </button>
+);
+
+// ==========================================
+// หน้าจอ 1: ระบบสแกนและตรวจข้อสอบ
+// ==========================================
+function ScannerTab({ answerKey, onSaveResult }) {
+  const [imageSrc, setImageSrc] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [result, setResult] = useState(null);
 
-  const videoRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const streamRef = useRef(null); 
-  const [stream, setStream] = useState(null);
-  const [cameraError, setCameraError] = useState('');
-  
-  const isProcessingRef = useRef(false);
-  const answerKeyRef = useRef(answerKey);
-  const animationFrameId = useRef(null);
-  const stableFramesCount = useRef(0);
-  const [alignedCorners, setAlignedCorners] = useState({ tl: false, tr: false, bl: false, br: false });
-
-  const [blocks, setBlocks] = useState(() => {
-    const saved = localStorage.getItem('omr_blocks_config');
-    return saved ? JSON.parse(saved) : DEFAULT_BLOCKS;
-  });
-
-  const [scanResult, setScanResult] = useState(null);
-  const [warpedImageUrl, setWarpedImageUrl] = useState(null); 
-
-  const OPTIONS = ['ก', 'ข', 'ค', 'ง', 'จ'];
-
-  useEffect(() => {
-    if (window.cv) { setCvReady(true); return; }
-    const script = document.createElement("script");
-    script.src = "https://docs.opencv.org/4.8.0/opencv.js";
-    script.async = true;
-    script.onload = () => {
-      if (window.cv instanceof Promise) {
-          window.cv.then((target) => { window.cv = target; setCvReady(true); });
-      } else {
-          window.cv['onRuntimeInitialized'] = () => { setCvReady(true); };
-      }
-    };
-    document.body.appendChild(script);
-  }, []);
-
-  useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
-
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    setStream(null);
-    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
-  }, []);
-
-  const startCamera = useCallback(async () => {
-    setCameraError('');
-    try {
-      if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
-      const newStream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1440 } } 
-      });
-      streamRef.current = newStream;
-      setStream(newStream);
-    } catch (err) {
-      setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตกล้อง");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (activeTab === 'scan' && !streamRef.current && cvReady) startCamera();
-    else if (activeTab !== 'scan') stopCamera(); 
-  }, [activeTab, startCamera, stopCamera, cvReady]);
-
-  useEffect(() => { return () => stopCamera(); }, [stopCamera]);
-
-  // ==========================================
-  // Core Engine: หาจุด 4 มุม แบบ Strict Regional (บังคับหาเฉพาะในกรอบ)
-  // ==========================================
-  const findMarkersStrict = (srcMat) => {
-    const cv = window.cv;
-    const w = srcMat.cols;
-    const h = srcMat.rows;
-    let gray = new cv.Mat();
-    
-    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY, 0);
-
-    const getCenterOfMassInZone = (zone) => {
-      // คำนวณขอบเขตการค้นหาจากโซนที่กำหนด (± เล็กน้อยเผื่อมือสั่น)
-      const sx = Math.max(0, Math.floor((zone.x - zone.w/2) * w));
-      const sy = Math.max(0, Math.floor((zone.y - zone.h/2) * h));
-      const ew = Math.floor(zone.w * w);
-      const eh = Math.floor(zone.h * h);
-      
-      let sumX = 0, sumY = 0, count = 0;
-      
-      for (let y = sy; y < sy + eh; y += 2) {
-        for (let x = sx; x < sx + ew; x += 2) {
-          if (x >= w || y >= h) continue;
-          const pixel = gray.ucharPtr(y, x)[0];
-          if (pixel < 100) { // เกณฑ์สีดำ
-            sumX += x; sumY += y; count++;
-          }
-        }
-      }
-      
-      const area = (ew / 2) * (eh / 2);
-      // ถ้าเจอสีดำมากพอ ให้คืนค่าจุดศูนย์ถ่วง
-      if (count > area * 0.05 && count < area * 0.6) {
-        return { x: sumX / count, y: sumY / count, found: true };
-      }
-      // **FALLBACK (สำคัญมาก):** ถ้าหาไม่เจอ ให้ยึดเอาตรงกลางเป้าเล็งเป็นหลักเลย ป้องกันแอปค้าง
-      return { x: zone.x * w, y: zone.y * h, found: false };
-    };
-
-    try {
-      const tl = getCenterOfMassInZone(TARGET_ZONES.tl); 
-      const tr = getCenterOfMassInZone(TARGET_ZONES.tr); 
-      const bl = getCenterOfMassInZone(TARGET_ZONES.bl); 
-      const br = getCenterOfMassInZone(TARGET_ZONES.br); 
-
-      return { tl, tr, bl, br }; 
-    } finally {
-      gray.delete();
-    }
-  };
-
-  const generateExpectedPoints = (configBlocks) => {
-    const points = [];
-    configBlocks.forEach(block => {
-      if (block.type === 'q') {
-        for (let q = block.startQ - 1; q < block.endQ; q++) {
-          const v = block.v + ((q - (block.startQ - 1)) * block.stepV);
-          for (let opt = 0; opt < 5; opt++) {
-            points.push({ type: 'ans', q, opt, u: block.u + (opt * block.stepU), v });
-          }
-        }
-      } else if (block.type === 'id') {
-        for (let digit = 0; digit < block.digits; digit++) {
-          const u = block.u + (digit * block.stepU);
-          for (let num = 0; num < 10; num++) {
-            points.push({ type: 'id', digit, num, u, v: block.v + (num * block.stepV) });
-          }
-        }
-      }
-    });
-    return points;
-  };
-
-  const processImageInternal = useCallback((sourceCanvas) => {
-    const cv = window.cv;
-    setIsProcessing(true);
-    setScanResult(null);
-
-    setTimeout(() => {
-      let src = null, warped = null, warpedGray = null, warpedThresh = null;
-      let M = null;
-      let srcCoords = null, dstCoords = null; 
-
-      try {
-        src = cv.imread(sourceCanvas);
-        
-        // ใช้ระบบจับมุมแบบใหม่ การันตีว่าได้พิกัดเสมอ 100%
-        const markersResult = findMarkersStrict(src);
-
-        const WARP_W = 800, WARP_H = 1131; // สัดส่วน A4 (1:1.414)
-        warped = new cv.Mat();
-        
-        srcCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
-          markersResult.tl.x, markersResult.tl.y, 
-          markersResult.tr.x, markersResult.tr.y, 
-          markersResult.br.x, markersResult.br.y, 
-          markersResult.bl.x, markersResult.bl.y
-        ]);
-        dstCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
-          0, 0, WARP_W, 0, WARP_W, WARP_H, 0, WARP_H
-        ]);
-
-        // ดึงภาพให้ตรง
-        M = cv.getPerspectiveTransform(srcCoords, dstCoords);
-        cv.warpPerspective(src, warped, M, new cv.Size(WARP_W, WARP_H));
-
-        const displayCanvas = document.createElement('canvas');
-        cv.imshow(displayCanvas, warped);
-        setWarpedImageUrl(displayCanvas.toDataURL('image/jpeg', 0.9));
-
-        warpedGray = new cv.Mat();
-        warpedThresh = new cv.Mat();
-        cv.cvtColor(warped, warpedGray, cv.COLOR_RGBA2GRAY, 0);
-        // Adaptive Threshold เพื่อสู้แสงเงา
-        cv.adaptiveThreshold(warpedGray, warpedThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 15);
-
-        const analyzeBubble = (u, v) => {
-          const x = Math.floor(u * WARP_W);
-          const y = Math.floor(v * WARP_H);
-          const radius = 14; 
-          
-          let roiRect = new cv.Rect(Math.max(0, x - radius), Math.max(0, y - radius), radius * 2, radius * 2);
-          let roi = warpedThresh.roi(roiRect);
-          
-          let nonZero = cv.countNonZero(roi);
-          let total = roi.rows * roi.cols;
-          let density = total > 0 ? nonZero / total : 0;
-          
-          roi.delete();
-          return { density, center: { x: u, y: v } };
-        };
-
-        const points = generateExpectedPoints(blocks);
-        const detectedAnswers = Array(20).fill(null);
-        const idValues = Array(5).fill("?");
-        
-        const optionsData = {}; 
-        const idData = {};
-
-        points.forEach(pt => {
-          const res = analyzeBubble(pt.u, pt.v);
-          if (pt.type === 'ans') {
-            if(!optionsData[pt.q]) optionsData[pt.q] = [];
-            optionsData[pt.q].push({ ...pt, ...res });
-          } else {
-            if(!idData[pt.digit]) idData[pt.digit] = [];
-            idData[pt.digit].push({ ...pt, ...res });
-          }
-        });
-
-        Object.keys(optionsData).forEach(q => {
-          const options = optionsData[q];
-          options.sort((a, b) => b.density - a.density); 
-          const darkest = options[0];
-          // เกณฑ์ความเข้ม
-          if (darkest.density > 0.12) {
-            detectedAnswers[q] = OPTIONS[darkest.opt];
-          }
-        });
-
-        Object.keys(idData).forEach(d => {
-          const options = idData[d];
-          options.sort((a, b) => b.density - a.density);
-          const darkest = options[0];
-          if (darkest.density > 0.12) {
-            idValues[d] = darkest.num.toString();
-          }
-        });
-
-        let score = 0;
-        let totalGraded = 0;
-        const details = [];
-        const keys = answerKeyRef.current;
-        const isKeyEmpty = keys.every(k => k === null); 
-        
-        for (let i = 0; i < 20; i++) {
-          const isGraded = keys[i] !== null; 
-          let isCorrect = false;
-
-          if (isGraded) {
-            totalGraded++;
-            isCorrect = detectedAnswers[i] === keys[i];
-            if (isCorrect) score++;
-          }
-          
-          let box = null;
-          if (detectedAnswers[i]) {
-            const optIdx = OPTIONS.indexOf(detectedAnswers[i]);
-            const pt = optionsData[i].find(o => o.opt === optIdx);
-            if (pt) box = { x: pt.u - 0.015, y: pt.v - 0.011, w: 0.03, h: 0.022 };
-          }
-          
-          details.push({ 
-            qNumber: i + 1, studentAns: detectedAnswers[i], correctAns: keys[i] || '-', 
-            isCorrect, box, isGraded 
-          });
-        }
-
-        setScanResult({
-          studentId: idValues.join(''), score, total: totalGraded, details, 
-          radarPoints: points, missingKey: isKeyEmpty 
-        });
-        
-        setIsProcessing(false);
-        setActiveTab('results');
-        stopCamera();
-
-      } catch (err) {
-        console.error("Engine Error:", err);
-        alert("เกิดข้อผิดพลาดในการประมวลผล กรุณาลองใหม่อีกครั้ง");
-        setIsProcessing(false);
-      } finally {
-        if(src) src.delete(); if(warped) warped.delete(); if(warpedGray) warpedGray.delete();
-        if(warpedThresh) warpedThresh.delete(); if(srcCoords) srcCoords.delete();
-        if(dstCoords) dstCoords.delete(); if(M) M.delete();
-      }
-    }, 50); 
-  }, [blocks, stopCamera, startCamera]);
-
-  const captureAndProcess = useCallback(() => {
-    if (!videoRef.current || isProcessingRef.current) return;
-    const video = videoRef.current;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
-    // ครอบตัดภาพตามสัดส่วน 3:4 ให้ตรงกับ UI
-    const targetRatio = 3 / 4;
-    let sX = 0, sY = 0, sW = video.videoWidth, sH = video.videoHeight;
-    
-    if ((sW / sH) > targetRatio) { 
-      sW = sH * targetRatio; 
-      sX = (video.videoWidth - sW) / 2; 
-    } else { 
-      sH = sW / targetRatio; 
-      sY = (video.videoHeight - sH) / 2; 
-    }
-
-    canvas.width = sW; 
-    canvas.height = sH; 
-    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
-    
-    processImageInternal(canvas);
-  }, [processImageInternal]);
-
-  const checkAlignmentAndScan = useCallback(() => {
-    if (!videoRef.current || isProcessingRef.current || !streamRef.current || !window.cv) {
-      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-      return;
-    }
-    const video = videoRef.current;
-    if (video.readyState !== 4) {
-      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-      return;
-    }
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    canvas.width = 150; canvas.height = 200; 
-    
-    const targetRatio = canvas.width / canvas.height;
-    let sX = 0, sY = 0, sW = video.videoWidth, sH = video.videoHeight;
-    if ((sW / sH) > targetRatio) { sW = sH * targetRatio; sX = (video.videoWidth - sW) / 2; } 
-    else { sH = sW / targetRatio; sY = (video.videoHeight - sH) / 2; }
-
-    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
-    
-    try {
-      let src = window.cv.imread(canvas);
-      const markers = findMarkersStrict(src);
-      src.delete();
-
-      setAlignedCorners({
-        tl: markers.tl.found, tr: markers.tr.found, bl: markers.bl.found, br: markers.br.found
-      });
-
-      // ถ้าล็อกเจอ 4 มุมจริงๆ (พบสีดำชัดเจน) จะถ่ายรูปอัตโนมัติ
-      if (markers.tl.found && markers.tr.found && markers.bl.found && markers.br.found) {
-        stableFramesCount.current++;
-        if (stableFramesCount.current > 8) {
-          stableFramesCount.current = 0;
-          captureAndProcess(); 
-          return; 
-        }
-      } else {
-        stableFramesCount.current = 0;
-      }
-    } catch(e) {}
-
-    animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-  }, [captureAndProcess]);
-
-  useEffect(() => {
-    if (activeTab === 'scan' && stream && videoRef.current && cvReady) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().then(() => {
-          stableFramesCount.current = 0;
-          animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-      }).catch(e => console.error(e));
-    }
-    return () => { if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current); };
-  }, [activeTab, stream, cvReady, checkAlignmentAndScan]);
-
-  const handleManualUpload = (e) => {
+  const handleImageUpload = (e) => {
     const file = e.target.files[0];
     if (file) {
-      stopCamera();
       const reader = new FileReader();
       reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          
-          const targetRatio = 3 / 4;
-          let sX = 0, sY = 0, sW = img.width, sH = img.height;
-          if ((sW / sH) > targetRatio) { sW = sH * targetRatio; sX = (img.width - sW) / 2; } 
-          else { sH = sW / targetRatio; sY = (img.height - sH) / 2; }
-
-          const MAX_WIDTH = 1200;
-          let w = sW, h = sH;
-          if (w > MAX_WIDTH) { h = Math.floor(h * (MAX_WIDTH / w)); w = MAX_WIDTH; }
-          
-          canvas.width = w; canvas.height = h; 
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          ctx.drawImage(img, sX, sY, sW, sH, 0, 0, w, h);
-          
-          processImageInternal(canvas);
-        };
-        img.src = event.target.result;
+        setImageSrc(event.target.result);
+        setResult(null);
       };
       reader.readAsDataURL(file);
     }
   };
 
-  // ==========================================
-  // UI RENDERERS
-  // ==========================================
+  const handleProcess = async (imageElement, cropPoints) => {
+    setIsProcessing(true);
+    // หน่วงเวลาเล็กน้อยให้ UI อัปเดตสถานะ Loading
+    await new Promise(r => setTimeout(r, 100)); 
+    
+    try {
+      const gradeResult = processOMR(imageElement, cropPoints, answerKey);
+      setResult(gradeResult);
+      onSaveResult(gradeResult);
+    } catch (err) {
+      alert("เกิดข้อผิดพลาดในการประมวลผล กรุณาลองจัดตำแหน่งใหม่อีกครั้ง");
+      console.error(err);
+    }
+    setIsProcessing(false);
+  };
 
-  if (!cvReady) {
+  const resetScanner = () => {
+    setImageSrc(null);
+    setResult(null);
+  };
+
+  if (result) {
+    return <ResultDisplay result={result} onReset={resetScanner} />;
+  }
+
+  if (imageSrc) {
     return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4 text-white">
-        <ScanLine className="w-16 h-16 text-emerald-400 animate-pulse mb-4" />
-        <h2 className="text-2xl font-bold tracking-wider">กำลังโหลด AI Engine...</h2>
+      <ImageAligner 
+        imageSrc={imageSrc} 
+        onCancel={resetScanner} 
+        onConfirm={handleProcess}
+        isProcessing={isProcessing}
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col items-center justify-center h-full p-6 bg-gray-50">
+      <div className="w-full max-w-sm bg-white rounded-2xl shadow-lg p-8 text-center border border-gray-100">
+        <div className="w-24 h-24 bg-indigo-50 rounded-full flex items-center justify-center mx-auto mb-6">
+          <Upload className="text-indigo-500 w-12 h-12" />
+        </div>
+        <h2 className="text-2xl font-bold text-gray-800 mb-2">อัปโหลดกระดาษคำตอบ</h2>
+        <p className="text-gray-500 text-sm mb-8">ถ่ายรูปหรือเลือกภาพกระดาษคำตอบจากแกลเลอรี่ของคุณ</p>
+        
+        <label className="flex items-center justify-center gap-2 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-4 px-6 rounded-xl cursor-pointer transition-colors shadow-md active:scale-95">
+          <Camera size={20} />
+          ถ่ายภาพ / เลือกไฟล์
+          <input 
+            type="file" 
+            accept="image/*" 
+            capture="environment" 
+            className="hidden" 
+            onChange={handleImageUpload} 
+          />
+        </label>
+        
+        <div className="mt-6 flex items-start gap-2 text-left text-sm text-yellow-700 bg-yellow-50 p-4 rounded-lg">
+          <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+          <p>ถ่ายภาพให้เห็นจุดสี่เหลี่ยมสีดำทั้ง 4 มุมให้ชัดเจน และพยายามให้กระดาษเรียบที่สุด</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// เครื่องมือจัดตำแหน่งภาพ (Image Aligner)
+// ==========================================
+function ImageAligner({ imageSrc, onCancel, onConfirm, isProcessing }) {
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const imageRef = useRef(null);
+  
+  // จุด 4 มุม (Normalized 0.0 - 1.0)
+  const [points, setPoints] = useState({
+    tl: { x: 0.1, y: 0.1 },
+    tr: { x: 0.9, y: 0.1 },
+    br: { x: 0.9, y: 0.9 },
+    bl: { x: 0.1, y: 0.9 },
+  });
+  
+  const [draggingPoint, setDraggingPoint] = useState(null);
+
+  useEffect(() => {
+    const img = new Image();
+    img.src = imageSrc;
+    img.onload = () => {
+      imageRef.current = img;
+      drawCanvas();
+    };
+  }, [imageSrc, points]);
+
+  const drawCanvas = () => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    const img = imageRef.current;
+    if (!canvas || !img || !container) return;
+
+    const ctx = canvas.getContext('2d');
+    
+    // ตั้งขนาด Canvas ให้พอดีจอ
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    canvas.width = cw;
+    canvas.height = ch;
+
+    // คำนวณ Scale เพื่อวาดรูปตรงกลาง
+    const scale = Math.min(cw / img.width, ch / img.height) * 0.95;
+    const dw = img.width * scale;
+    const dh = img.height * scale;
+    const dx = (cw - dw) / 2;
+    const dy = (ch - dh) / 2;
+
+    ctx.clearRect(0, 0, cw, ch);
+    
+    // วาดภาพพื้นหลัง
+    ctx.drawImage(img, dx, dy, dw, dh);
+
+    // ฟังก์ชันช่วยแปลง Normalized -> Canvas Coords
+    const toPx = (normX, normY) => ({
+      x: dx + normX * dw,
+      y: dy + normY * dh
+    });
+
+    const pTL = toPx(points.tl.x, points.tl.y);
+    const pTR = toPx(points.tr.x, points.tr.y);
+    const pBR = toPx(points.br.x, points.br.y);
+    const pBL = toPx(points.bl.x, points.bl.y);
+
+    // วาดกรอบสี่เหลี่ยม (Polygon)
+    ctx.beginPath();
+    ctx.moveTo(pTL.x, pTL.y);
+    ctx.lineTo(pTR.x, pTR.y);
+    ctx.lineTo(pBR.x, pBR.y);
+    ctx.lineTo(pBL.x, pBL.y);
+    ctx.closePath();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#22c55e'; // Green
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.2)';
+    ctx.fill();
+    ctx.stroke();
+
+    // วาดจุดจับ (Handles)
+    const drawHandle = (p) => {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#22c55e';
+      ctx.stroke();
+      
+      // วาดเป้าตรงกลาง
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#ef4444';
+      ctx.fill();
+    };
+
+    drawHandle(pTL);
+    drawHandle(pTR);
+    drawHandle(pBR);
+    drawHandle(pBL);
+  };
+
+  const handlePointerDown = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX || (e.touches && e.touches[0].clientX) - rect.left;
+    const y = e.clientY || (e.touches && e.touches[0].clientY) - rect.top;
+
+    const img = imageRef.current;
+    const cw = canvas.width;
+    const ch = canvas.height;
+    const scale = Math.min(cw / img.width, ch / img.height) * 0.95;
+    const dw = img.width * scale;
+    const dh = img.height * scale;
+    const dx = (cw - dw) / 2;
+    const dy = (ch - dh) / 2;
+
+    const toPx = (normX, normY) => ({ x: dx + normX * dw, y: dy + normY * dh });
+    const hitRadius = 30; // รัศมีการสัมผัสกว้างหน่อยสำหรับมือถือ
+
+    for (const key of ['tl', 'tr', 'br', 'bl']) {
+      const p = toPx(points[key].x, points[key].y);
+      const dist = Math.sqrt(Math.pow(p.x - x, 2) + Math.pow(p.y - y, 2));
+      if (dist < hitRadius) {
+        setDraggingPoint(key);
+        return;
+      }
+    }
+  };
+
+  const handlePointerMove = (e) => {
+    if (!draggingPoint) return;
+    
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX || (e.touches && e.touches[0].clientX)) - rect.left;
+    const y = (e.clientY || (e.touches && e.touches[0].clientY)) - rect.top;
+
+    const img = imageRef.current;
+    const cw = canvas.width;
+    const ch = canvas.height;
+    const scale = Math.min(cw / img.width, ch / img.height) * 0.95;
+    const dw = img.width * scale;
+    const dh = img.height * scale;
+    const dx = (cw - dw) / 2;
+    const dy = (ch - dh) / 2;
+
+    // แปลงกลับเป็น Normalized
+    let normX = (x - dx) / dw;
+    let normY = (y - dy) / dh;
+    
+    // ขีดจำกัดให้อยู่ในภาพ
+    normX = Math.max(0, Math.min(1, normX));
+    normY = Math.max(0, Math.min(1, normY));
+
+    setPoints(prev => ({
+      ...prev,
+      [draggingPoint]: { x: normX, y: normY }
+    }));
+  };
+
+  const handlePointerUp = () => {
+    setDraggingPoint(null);
+  };
+
+  return (
+    <div className="flex flex-col h-full bg-black relative">
+      <div className="absolute top-4 left-0 right-0 z-10 flex justify-center pointer-events-none">
+        <div className="bg-black/60 text-white px-4 py-2 rounded-full text-sm font-medium backdrop-blur-sm">
+          ลากจุดให้ตรงกับสี่เหลี่ยมสีดำทั้ง 4 มุม
+        </div>
+      </div>
+
+      <div 
+        ref={containerRef} 
+        className="flex-1 overflow-hidden relative"
+        onMouseDown={handlePointerDown}
+        onMouseMove={handlePointerMove}
+        onMouseUp={handlePointerUp}
+        onMouseLeave={handlePointerUp}
+        onTouchStart={handlePointerDown}
+        onTouchMove={handlePointerMove}
+        onTouchEnd={handlePointerUp}
+      >
+        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none" />
+      </div>
+
+      <div className="bg-white p-4 pb-safe-bottom flex gap-4 shadow-lg rounded-t-2xl z-10">
+        <button 
+          onClick={onCancel}
+          className="flex-1 py-3 px-4 bg-gray-100 text-gray-700 font-semibold rounded-xl active:bg-gray-200 transition-colors"
+        >
+          ยกเลิก
+        </button>
+        <button 
+          onClick={() => onConfirm(imageRef.current, points)}
+          disabled={isProcessing}
+          className="flex-1 py-3 px-4 bg-indigo-600 text-white font-semibold rounded-xl active:bg-indigo-700 transition-colors flex justify-center items-center gap-2 disabled:opacity-70"
+        >
+          {isProcessing ? (
+            <><RefreshCw className="animate-spin" size={20} /> กำลังตรวจ...</>
+          ) : (
+            <><CheckCircle size={20} /> ตรวจคำตอบ</>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// อัลกอริทึมประมวลผล OMR (Pure JS)
+// ==========================================
+const processOMR = (imgElement, normPoints, answerKey) => {
+  const outW = 600;
+  const outH = 800;
+  
+  // 1. ดึงข้อมูลภาพต้นฉบับ
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = imgElement.naturalWidth;
+  tempCanvas.height = imgElement.naturalHeight;
+  const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+  tempCtx.drawImage(imgElement, 0, 0);
+
+  // 2. แปลงพิกัดเป็นพิกัดจริงบนภาพ
+  const pts = {
+    tl: { x: normPoints.tl.x * tempCanvas.width, y: normPoints.tl.y * tempCanvas.height },
+    tr: { x: normPoints.tr.x * tempCanvas.width, y: normPoints.tr.y * tempCanvas.height },
+    bl: { x: normPoints.bl.x * tempCanvas.width, y: normPoints.bl.y * tempCanvas.height },
+    br: { x: normPoints.br.x * tempCanvas.width, y: normPoints.br.y * tempCanvas.height },
+  };
+
+  // 3. Bilinear Interpolation (Perspective Warp แบบประยุกต์)
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  
+  const srcData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height).data;
+  const destImgData = ctx.createImageData(outW, outH);
+  const destData = destImgData.data;
+
+  for (let y = 0; y < outH; y++) {
+    const v = y / outH;
+    for (let x = 0; x < outW; x++) {
+      const u = x / outW;
+      
+      const topX = pts.tl.x + (pts.tr.x - pts.tl.x) * u;
+      const topY = pts.tl.y + (pts.tr.y - pts.tl.y) * u;
+      const botX = pts.bl.x + (pts.br.x - pts.bl.x) * u;
+      const botY = pts.bl.y + (pts.br.y - pts.bl.y) * u;
+
+      const sx = Math.floor(topX + (botX - topX) * v);
+      const sy = Math.floor(topY + (botY - topY) * v);
+
+      if (sx >= 0 && sx < tempCanvas.width && sy >= 0 && sy < tempCanvas.height) {
+        const srcIdx = (sy * tempCanvas.width + sx) * 4;
+        const destIdx = (y * outW + x) * 4;
+        destData[destIdx] = srcData[srcIdx];
+        destData[destIdx + 1] = srcData[srcIdx + 1];
+        destData[destIdx + 2] = srcData[srcIdx + 2];
+        destData[destIdx + 3] = 255;
+      }
+    }
+  }
+  ctx.putImageData(destImgData, 0, 0);
+
+  // 4. วิเคราะห์ความเข้ม (Darkness Analysis)
+  const layout = getLayout();
+  const radius = 9; // รัศมีวงกลมที่ใช้อ่าน
+  const threshold = 50; // ความเข้มขั้นต่ำที่จะถือว่าระบาย (0-255)
+
+  const getDarkness = (normX, normY) => {
+    const px = Math.floor(normX * outW);
+    const py = Math.floor(normY * outH);
+    const size = radius * 2;
+    const sx = Math.max(0, px - radius);
+    const sy = Math.max(0, py - radius);
+    
+    // ตรวจสอบขอบเขต
+    if (sx < 0 || sy < 0 || sx + size > outW || sy + size > outH) return 0;
+    
+    const data = ctx.getImageData(sx, sy, size, size).data;
+    let darkSum = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      // แปลงเป็น Grayscale และกลับค่า (ดำ = มาก)
+      const gray = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+      darkSum += (255 - gray);
+    }
+    return darkSum / (size * size);
+  };
+
+  const results = [];
+  let score = 0;
+
+  // ตรวจคำตอบข้อ 1-20
+  layout.questions.forEach(q => {
+    let maxDarkness = -1;
+    let selectedOpt = -1;
+    const optionsDarkness = [];
+
+    for (let i = 0; i < 5; i++) {
+      const cx = q.startX + i * q.stepX;
+      const cy = q.y;
+      const d = getDarkness(cx, cy);
+      optionsDarkness.push(d);
+      
+      if (d > maxDarkness) {
+        maxDarkness = d;
+        selectedOpt = i;
+      }
+    }
+
+    if (maxDarkness < threshold) {
+      selectedOpt = -1; // ไม่ได้ตอบ
+    } else {
+      // เช็คฝนหลายข้อ
+      const sorted = [...optionsDarkness].sort((a, b) => b - a);
+      if (sorted[1] > threshold && (maxDarkness - sorted[1]) < 25) {
+        selectedOpt = -2; // ฝนมามากกว่า 1 ข้อ
+      }
+    }
+
+    const correctOpt = answerKey[q.id];
+    const isCorrect = selectedOpt === correctOpt && selectedOpt >= 0;
+    if (isCorrect) score++;
+
+    results.push({
+      id: q.id,
+      selected: selectedOpt,
+      correct: correctOpt,
+      isCorrect,
+      cx: q.startX,
+      cy: q.y,
+      stepX: q.stepX
+    });
+  });
+
+  // อ่านรหัสนักเรียน
+  let studentId = "";
+  layout.studentId.forEach(col => {
+    let maxD = -1;
+    let selectedDigit = "?";
+    col.forEach(row => {
+      const d = getDarkness(row.x, row.y);
+      if (d > maxD && d > threshold) {
+        maxD = d;
+        selectedDigit = row.val.toString();
+      }
+    });
+    studentId += selectedDigit;
+  });
+
+  // 5. วาด Overlay แสดงผลตรวจบนรูป
+  ctx.lineWidth = 4;
+  results.forEach(res => {
+    // วงกลมสีเขียว = คำตอบที่ถูกต้อง
+    if (res.correct !== undefined && res.correct >= 0) {
+      ctx.strokeStyle = '#22c55e';
+      ctx.beginPath();
+      ctx.arc((res.cx + res.correct * res.stepX) * outW, res.cy * outH, 16, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // วงกลมสีแดง = ตอบผิด
+    if (!res.isCorrect && res.selected >= 0) {
+      ctx.strokeStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc((res.cx + res.selected * res.stepX) * outW, res.cy * outH, 16, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // วงกลมสีเหลืองทึบ = ฝนหลายข้อ
+    if (res.selected === -2) {
+      ctx.fillStyle = 'rgba(234, 179, 8, 0.5)';
+      ctx.beginPath();
+      ctx.arc(res.cx * outW, res.cy * outH, 20, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  return {
+    score,
+    total: 20,
+    studentId,
+    details: results,
+    processedImage: canvas.toDataURL('image/jpeg', 0.8)
+  };
+};
+
+// ==========================================
+// แสดงผลลัพธ์การตรวจ
+// ==========================================
+function ResultDisplay({ result, onReset }) {
+  return (
+    <div className="flex flex-col h-full bg-gray-100">
+      <div className="bg-white p-4 shadow-sm flex items-center gap-4 z-10">
+        <button onClick={onReset} className="p-2 bg-gray-100 rounded-full text-gray-600 hover:bg-gray-200">
+          <ChevronLeft size={24} />
+        </button>
+        <h2 className="text-lg font-bold">ผลการตรวจ</h2>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* สรุปคะแนน */}
+        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 text-center">
+          <p className="text-gray-500 text-sm font-medium mb-1">รหัสนักเรียน</p>
+          <p className="text-2xl font-mono font-bold text-gray-800 tracking-widest mb-6">
+            {result.studentId.includes('?') ? (
+              <span className="text-red-500">{result.studentId} (อ่านไม่ชัด)</span>
+            ) : result.studentId}
+          </p>
+          
+          <div className="inline-flex items-end justify-center gap-2">
+            <span className="text-6xl font-black text-indigo-600 leading-none">{result.score}</span>
+            <span className="text-2xl font-bold text-gray-400 mb-1">/ {result.total}</span>
+          </div>
+          <p className="text-green-600 font-medium mt-3">
+            คิดเป็น {Math.round((result.score / result.total) * 100)}%
+          </p>
+        </div>
+
+        {/* ภาพกระดาษคำตอบที่ตรวจแล้ว */}
+        <div className="bg-white rounded-2xl p-2 shadow-sm border border-gray-100">
+          <div className="flex justify-between items-center px-4 py-2 border-b border-gray-50 mb-2">
+            <span className="font-semibold text-gray-700">กระดาษคำตอบที่สแกน</span>
+            <div className="flex gap-3 text-xs font-medium">
+              <span className="text-green-600 flex items-center gap-1"><div className="w-3 h-3 rounded-full border-2 border-green-500"></div> ถูกต้อง</span>
+              <span className="text-red-500 flex items-center gap-1"><div className="w-3 h-3 rounded-full border-2 border-red-500"></div> ผิด</span>
+            </div>
+          </div>
+          <img 
+            src={result.processedImage} 
+            alt="Processed OMR" 
+            className="w-full h-auto rounded-xl border border-gray-200"
+          />
+        </div>
+
+        <button 
+          onClick={onReset}
+          className="w-full py-4 bg-indigo-600 text-white font-bold rounded-xl shadow-md active:bg-indigo-700 transition-colors"
+        >
+          สแกนแผ่นต่อไป
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// หน้าจอ 2: ระบบตั้งเฉลย
+// ==========================================
+function AnswerKeyTab({ answerKey, setAnswerKey }) {
+  const setAnswer = (qId, optIdx) => {
+    setAnswerKey(prev => ({ ...prev, [qId]: optIdx }));
+  };
+
+  const randomizeKeys = () => {
+    if(window.confirm("ต้องการล้างเฉลยเดิมและสุ่มใหม่ใช่หรือไม่?")) {
+      const newKey = {};
+      for (let i = 1; i <= 20; i++) {
+        newKey[i] = Math.floor(Math.random() * 5);
+      }
+      setAnswerKey(newKey);
+    }
+  };
+
+  return (
+    <div className="p-4 pb-24">
+      <div className="flex justify-between items-center mb-6">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">เฉลยข้อสอบ</h2>
+          <p className="text-sm text-gray-500">กำหนดคำตอบที่ถูกต้องสำหรับ 20 ข้อ</p>
+        </div>
+        <button onClick={randomizeKeys} className="p-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100">
+          <RefreshCw size={20} />
+        </button>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="grid grid-cols-[3rem_1fr] bg-gray-50 border-b border-gray-200 py-3 px-4 font-semibold text-gray-600 text-sm">
+          <div className="text-center">ข้อ</div>
+          <div className="flex justify-between px-2">
+            {OPTIONS_TH.map(opt => <span key={opt} className="w-8 text-center">{opt}</span>)}
+          </div>
+        </div>
+        
+        <div className="divide-y divide-gray-100">
+          {Array.from({ length: 20 }).map((_, i) => {
+            const qId = i + 1;
+            return (
+              <div key={qId} className="grid grid-cols-[3rem_1fr] py-3 px-4 hover:bg-indigo-50/30 transition-colors">
+                <div className="flex items-center justify-center font-bold text-gray-700">
+                  {qId}
+                </div>
+                <div className="flex justify-between px-2">
+                  {OPTIONS_TH.map((opt, optIdx) => {
+                    const isSelected = answerKey[qId] === optIdx;
+                    return (
+                      <button
+                        key={optIdx}
+                        onClick={() => setAnswer(qId, optIdx)}
+                        className={`w-8 h-8 rounded-full flex items-center justify-center border-2 transition-all ${
+                          isSelected 
+                            ? 'border-indigo-600 bg-indigo-600 text-white font-bold scale-110 shadow-sm' 
+                            : 'border-gray-300 text-gray-400 hover:border-indigo-300'
+                        }`}
+                      >
+                        {isSelected && <CheckCircle size={16} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// หน้าจอ 3: ประวัติการตรวจ
+// ==========================================
+function HistoryTab({ history }) {
+  if (history.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-gray-400 space-y-4 p-6">
+        <History size={64} className="opacity-20" />
+        <p className="text-lg font-medium text-gray-500">ยังไม่มีประวัติการตรวจข้อสอบ</p>
       </div>
     );
   }
 
-  const renderKeysTab = () => (
-    <div className="p-4 max-w-4xl mx-auto bg-white rounded-2xl shadow-sm pb-24 mt-4">
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 space-y-4 sm:space-y-0">
-        <h2 className="text-2xl font-extrabold text-slate-800">1. ตั้งค่าเฉลย</h2>
-        <div className="flex space-x-2">
-          <button onClick={() => updateAnswerKey(Array(20).fill(null))} className="text-sm bg-rose-50 hover:bg-rose-100 text-rose-600 py-2 px-4 rounded-full font-bold transition">ล้างข้อมูล</button>
-          <button onClick={() => updateAnswerKey(Array(20).fill(null).map(() => OPTIONS[Math.floor(Math.random() * 5)]))} className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-4 rounded-full font-bold transition">สุ่มเฉลยด่วน</button>
-        </div>
-      </div>
-
-      <div className="mb-6">
-        <label className="block text-sm font-semibold text-slate-600 mb-2">ชื่อแบบทดสอบ</label>
-        <input type="text" value={subjectName} onChange={(e) => updateSubjectName(e.target.value)} className="w-full p-4 bg-slate-50 border-0 rounded-xl focus:ring-2 focus:ring-emerald-500 font-medium" />
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {[0, 1].map(col => (
-          <div key={`col-${col}`} className="space-y-2 bg-slate-50 p-4 rounded-2xl">
-            {Array(10).fill(null).map((_, i) => {
-              const qNum = (col * 10) + i;
-              return (
-                <div key={qNum} className="flex items-center justify-between p-2 hover:bg-white rounded-xl transition">
-                  <span className="w-8 font-bold text-slate-400 text-right">{qNum + 1}.</span>
-                  <div className="flex space-x-1 sm:space-x-2">
-                    {OPTIONS.map(opt => (
-                      <button key={opt} onClick={() => { const newKeys = [...answerKey]; newKeys[qNum] = opt; updateAnswerKey(newKeys); }} 
-                        className={`w-10 h-10 rounded-full font-bold transition-all ${ answerKey[qNum] === opt ? 'bg-emerald-500 text-white shadow-lg scale-110' : 'bg-white border-2 border-slate-200 text-slate-400 hover:border-emerald-300' }`}>
-                        {opt}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+  return (
+    <div className="p-4 pb-24">
+      <h2 className="text-2xl font-bold text-gray-800 mb-6">ประวัติการตรวจ ({history.length})</h2>
+      <div className="space-y-3">
+        {history.map(item => (
+          <div key={item.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center justify-between">
+            <div>
+              <p className="text-xs text-gray-400 mb-1">
+                {new Date(item.date).toLocaleDateString('th-TH', { hour: '2-digit', minute:'2-digit' })}
+              </p>
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-gray-500">รหัส:</span>
+                <span className="font-mono font-bold text-lg text-gray-800 tracking-wider">
+                  {item.studentId}
+                </span>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="inline-flex items-baseline gap-1">
+                <span className="text-2xl font-black text-indigo-600">{item.score}</span>
+                <span className="text-sm font-bold text-gray-400">/{item.total}</span>
+              </div>
+            </div>
           </div>
         ))}
       </div>
-    </div>
-  );
-
-  const renderScanTab = () => (
-    <div className="flex flex-col items-center justify-center min-h-[85vh] bg-slate-900 pb-24">
-      <div className="text-center mb-4 mt-4">
-        <h2 className="text-white font-bold text-xl tracking-wide">สแกนกระดาษคำตอบ</h2>
-        <p className="text-slate-400 text-sm">จัดสี่เหลี่ยมมุมกระดาษให้อยู่ในเป้าเล็งแล้วกดถ่าย</p>
-      </div>
-      
-      <div className="relative w-full max-w-sm aspect-[3/4] bg-black rounded-3xl overflow-hidden shadow-2xl border-4 border-slate-800">
-        {stream ? (
-          <>
-            <video ref={videoRef} autoPlay playsInline muted className="absolute w-full h-full object-cover" />
-            
-            <div className="absolute inset-0 pointer-events-none">
-              <div className="absolute inset-0 shadow-[0_0_0_9999px_rgba(0,0,0,0.4)] pointer-events-none rounded-xl m-4"></div>
-              {/* เป้าเล็ง 4 มุม ที่เชื่อมกับ TARGET_ZONES */}
-              <div className={`absolute top-[16%] left-[10%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.tl ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
-              <div className={`absolute top-[16%] left-[90%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.tr ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
-              <div className={`absolute top-[84%] left-[10%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.bl ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
-              <div className={`absolute top-[84%] left-[90%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.br ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
-            </div>
-
-            <div className="absolute bottom-6 w-full flex justify-center z-20">
-              <button onClick={captureAndProcess} className="bg-white text-slate-800 rounded-full p-5 shadow-[0_0_20px_rgba(0,0,0,0.3)] hover:scale-95 active:scale-90 transition"><Camera size={32} /></button>
-            </div>
-
-            {isProcessing && (
-              <div className="absolute inset-0 bg-slate-900/90 flex flex-col items-center justify-center z-30 backdrop-blur-sm">
-                <RefreshCw className="w-12 h-12 text-emerald-400 animate-spin mb-4" />
-                <p className="text-white font-bold tracking-widest text-lg">กำลังประมวลผล...</p>
-              </div>
-            )}
-          </>
-        ) : (
-           <div className="text-slate-500 flex flex-col items-center justify-center h-full"><RefreshCw className="w-10 h-10 animate-spin mb-4" />กำลังเปิดกล้อง...</div>
-        )}
-      </div>
-
-      <div className="mt-8">
-        <input type="file" accept="image/*" ref={fileInputRef} onChange={handleManualUpload} className="hidden" />
-        <button onClick={() => fileInputRef.current.click()} className="text-slate-300 font-medium px-6 py-2 rounded-full border border-slate-700 hover:bg-slate-800 flex items-center"><Upload className="w-4 h-4 mr-2" />เลือกรูปจากอัลบั้ม</button>
-      </div>
-    </div>
-  );
-
-  const renderTemplateTab = () => {
-    if (!warpedImageUrl) {
-      return (
-        <div className="p-8 text-center bg-white rounded-2xl shadow-sm max-w-xl mx-auto mt-10">
-          <LayoutGrid className="w-16 h-16 text-slate-200 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-slate-800 mb-2">ต้องถ่ายภาพกระดาษ 1 แผ่นก่อน</h2>
-          <p className="text-slate-500 mb-6 text-sm">การสร้างเทมเพลต (แบ่งโซนข้อสอบ) ต้องใช้ภาพที่ถูกสแกนและยืดให้ตรงแล้ว กรุณาไปสแกนกระดาษเปล่าหรือกระดาษที่ฝนแล้วมา 1 แผ่น</p>
-          <button onClick={() => setActiveTab('scan')} className="bg-emerald-500 text-white font-bold px-8 py-3 rounded-full hover:bg-emerald-600 transition shadow-lg">ไปหน้าสแกน</button>
-        </div>
-      );
-    }
-
-    const expectedPoints = generateExpectedPoints(blocks);
-
-    return (
-      <div className="p-4 max-w-6xl mx-auto bg-slate-50 rounded-2xl pb-24 mt-4">
-        <div className="mb-6 flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-extrabold text-slate-800 flex items-center"><LayoutGrid className="w-6 h-6 mr-2 text-emerald-500" /> สร้างเทมเพลต (Template Editor)</h2>
-            <p className="text-slate-500 text-sm mt-1">ปรับตารางจุดสีน้ำเงินให้ตรงกับวงกลมกระดาษ (ลากปรับบล็อกซ้าย-ขวา)</p>
-          </div>
-          <button onClick={() => { localStorage.setItem('omr_blocks_config', JSON.stringify(blocks)); alert('บันทึกเทมเพลตสำเร็จ! การสแกนครั้งต่อไปจะใช้เทมเพลตนี้'); }} className="bg-slate-800 text-white font-bold py-2 px-6 rounded-full flex items-center shadow-lg hover:bg-black transition"><Save className="w-4 h-4 mr-2"/> บันทึก</button>
-        </div>
-        
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          <div className="flex justify-center bg-white p-4 rounded-3xl shadow-sm">
-            <div style={{ aspectRatio: '800 / 1131' }} className="relative w-full max-w-md border border-slate-200 rounded-xl overflow-hidden bg-slate-100">
-              <img src={warpedImageUrl} alt="Template" className="absolute top-0 left-0 w-full h-full object-cover opacity-60" />
-              {expectedPoints.map((pt, idx) => (
-                <div key={`tp-${idx}`} className="absolute w-2 h-2 bg-blue-600 rounded-full transform -translate-x-1/2 -translate-y-1/2 shadow-sm ring-2 ring-white/50" style={{ left: `${pt.u * 100}%`, top: `${pt.v * 100}%` }}></div>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-6">
-            {blocks.map((block, idx) => (
-              <div key={block.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
-                <h3 className="font-bold text-slate-700 mb-4 border-b pb-2">
-                  {block.type === 'q' ? `โซนคำตอบ (ข้อ ${block.startQ} - ${block.endQ})` : 'โซนรหัสนักเรียน'}
-                </h3>
-                <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-                  <div>
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">แกน X (ซ้าย-ขวา)</label>
-                    <input type="range" min="0.05" max="0.90" step="0.001" value={block.u} onChange={e => { const nb = [...blocks]; nb[idx].u = parseFloat(e.target.value); setBlocks(nb); }} className="w-full accent-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">แกน Y (บน-ล่าง)</label>
-                    <input type="range" min="0.05" max="0.90" step="0.001" value={block.v} onChange={e => { const nb = [...blocks]; nb[idx].v = parseFloat(e.target.value); setBlocks(nb); }} className="w-full accent-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ระยะห่างแนวนอน</label>
-                    <input type="range" min="0.03" max="0.08" step="0.0005" value={block.stepU} onChange={e => { const nb = [...blocks]; nb[idx].stepU = parseFloat(e.target.value); setBlocks(nb); }} className="w-full accent-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">ระยะห่างแนวตั้ง</label>
-                    <input type="range" min="0.03" max="0.08" step="0.0005" value={block.stepV} onChange={e => { const nb = [...blocks]; nb[idx].stepV = parseFloat(e.target.value); setBlocks(nb); }} className="w-full accent-emerald-500" />
-                  </div>
-                </div>
-              </div>
-            ))}
-            
-            <button onClick={() => {
-               const canvas = document.createElement('canvas'); canvas.width = 800; canvas.height = 1131;
-               const ctx = canvas.getContext('2d');
-               const img = new Image(); img.onload = () => { ctx.drawImage(img,0,0,800,1131); processImageInternal(canvas); };
-               img.src = warpedImageUrl; 
-            }} className="w-full bg-emerald-50 text-emerald-700 font-bold py-4 rounded-xl border border-emerald-200 hover:bg-emerald-100 transition flex items-center justify-center shadow-sm">
-              <RefreshCw className="w-5 h-5 mr-2" /> ทดสอบตรวจแผ่นนี้ใหม่ด้วยเทมเพลตปัจจุบัน
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const renderResultsTab = () => {
-    if (!scanResult) return null;
-
-    return (
-      <div className="p-4 sm:p-6 max-w-5xl mx-auto bg-white rounded-2xl shadow-sm pb-24 mt-4">
-        
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          <div className="flex flex-col items-center bg-slate-50 p-4 rounded-3xl">
-            <div style={{ aspectRatio: '800 / 1131' }} className="relative w-full max-w-md border border-slate-200 rounded-xl overflow-hidden bg-white shadow-sm">
-              {warpedImageUrl && (
-                <>
-                  <img src={warpedImageUrl} alt="Warped" className="absolute top-0 left-0 w-full h-full object-cover" />
-                  
-                  {scanResult.radarPoints && scanResult.radarPoints.map((pt, idx) => (
-                    <div key={`radar-${idx}`} className="absolute w-1.5 h-1.5 bg-blue-500/80 rounded-full transform -translate-x-1/2 -translate-y-1/2" style={{ left: `${pt.u * 100}%`, top: `${pt.v * 100}%` }}></div>
-                  ))}
-
-                  {!scanResult.missingKey && scanResult.details.map((item, idx) => {
-                    if (!item.box) return null; 
-                    
-                    let ringClass = 'border-slate-400 bg-slate-400/20'; 
-                    if (item.isGraded) {
-                       ringClass = item.isCorrect ? 'border-emerald-500 bg-emerald-500/20' : 'border-rose-500 bg-rose-500/30';
-                    }
-
-                    return (
-                      <div key={idx} className={`absolute border-4 rounded-full shadow-sm ${ringClass}`} style={{ left: `${item.box.x * 100}%`, top: `${item.box.y * 100}%`, width: `${item.box.w * 100}%`, height: `${item.box.h * 100}%` }}>
-                        {item.isGraded && !item.isCorrect && <span className="absolute -top-7 left-1/2 transform -translate-x-1/2 bg-rose-600 text-white text-xs font-black px-2 py-0.5 rounded-md shadow">{item.correctAns}</span>}
-                      </div>
-                    );
-                  })}
-                </>
-              )}
-            </div>
-            <button onClick={() => setActiveTab('template')} className="mt-6 text-sm text-slate-500 hover:text-slate-800 font-medium flex items-center bg-white px-4 py-2 rounded-full shadow-sm border border-slate-200">
-              <Sliders className="w-4 h-4 mr-2"/> จุดสีน้ำเงินเบี้ยว? สร้างเทมเพลตใหม่
-            </button>
-          </div>
-
-          <div className="flex flex-col">
-            <div className="bg-slate-800 p-6 rounded-3xl text-white mb-8 shadow-xl flex items-center justify-between">
-              <div>
-                <p className="text-slate-400 font-medium text-sm mb-1">รหัสประจำตัว</p>
-                <p className="text-3xl font-black tracking-widest">{scanResult.studentId}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-slate-400 font-medium text-sm mb-1">คะแนนที่ได้</p>
-                <div className="flex items-baseline">
-                  <span className={`text-5xl font-black ${scanResult.score > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>
-                    {scanResult.missingKey ? '-' : scanResult.score}
-                  </span>
-                  <span className="text-xl text-slate-500 ml-1">/{scanResult.total}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 flex-1 content-start">
-              {scanResult.details.map((item, index) => (
-                <div key={index} className={`p-3 rounded-xl flex items-center justify-between border-2 text-sm font-medium ${
-                    !item.isGraded ? 'bg-slate-50 border-slate-200' :
-                    item.isCorrect ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'
-                }`}>
-                  <span className="text-slate-500 w-6">{item.qNumber}.</span>
-                  <span className="flex-1 text-slate-800 ml-2">ตอบ: <span className="font-black text-lg ml-1">{item.studentAns || '-'}</span></span>
-                  
-                  {!item.isGraded ? (
-                     <span className="text-slate-400 font-bold text-xs bg-slate-200 px-2 py-1 rounded-md shadow-sm">ไม่ได้เฉลย</span>
-                  ) : item.isCorrect ? (
-                     <CheckCircle className="w-5 h-5 text-emerald-500" />
-                  ) : (
-                     <span className="text-rose-600 font-bold bg-white px-2 py-1 rounded-md shadow-sm">เฉลย {item.correctAns}</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div className="min-h-screen bg-slate-100 font-sans">
-      <header className="bg-white px-6 py-4 shadow-sm sticky top-0 z-40 flex items-center justify-between">
-        <div className="flex items-center text-slate-800 font-black text-xl tracking-tight">
-          <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center mr-3">
-            <CheckCircle className="w-5 h-5 text-white" />
-          </div>
-          ZipGrade<span className="text-emerald-500 font-light ml-1">Clone</span>
-        </div>
-      </header>
-
-      <main className="w-full">
-        {activeTab === 'keys' && renderKeysTab()}
-        {activeTab === 'scan' && renderScanTab()}
-        {activeTab === 'results' && renderResultsTab()}
-        {activeTab === 'template' && renderTemplateTab()}
-      </main>
-
-      <nav className="fixed bottom-0 w-full bg-white border-t border-slate-200 px-6 py-4 flex justify-between items-center z-50 shadow-[0_-10px_20px_rgba(0,0,0,0.05)]">
-        <button onClick={() => setActiveTab('keys')} className={`flex flex-col items-center flex-1 transition ${activeTab === 'keys' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'}`}>
-          <FileText className={`w-6 h-6 mb-1 ${activeTab === 'keys' ? 'fill-emerald-100' : ''}`} />
-          <span className="text-[10px] font-bold tracking-wider">เฉลย</span>
-        </button>
-        <div className="flex-1 flex justify-center -mt-8">
-          <button onClick={() => setActiveTab('scan')} className={`w-16 h-16 rounded-full flex items-center justify-center shadow-xl transition-transform active:scale-95 ${activeTab === 'scan' ? 'bg-emerald-500 text-white' : 'bg-slate-800 text-white'}`}>
-            <ScanLine className="w-8 h-8" />
-          </button>
-        </div>
-        <button onClick={() => setActiveTab('template')} className={`flex flex-col items-center flex-1 transition ${activeTab === 'template' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'}`}>
-          <LayoutGrid className={`w-6 h-6 mb-1 ${activeTab === 'template' ? 'fill-emerald-100' : ''}`} />
-          <span className="text-[10px] font-bold tracking-wider">เทมเพลต</span>
-        </button>
-      </nav>
     </div>
   );
 }
