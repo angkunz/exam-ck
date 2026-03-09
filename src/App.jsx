@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Camera, FileText, CheckSquare, Settings, Play, RefreshCw, Save, AlertCircle, ScanLine, Sliders, Map, LayoutGrid, ChevronRight, XCircle, CheckCircle, Upload } from 'lucide-react';
+import { Camera, FileText, CheckSquare, Settings, Play, RefreshCw, Save, AlertCircle, ScanLine, Sliders, Map, LayoutGrid, ChevronRight, XCircle, CheckCircle, Upload, Trash2 } from 'lucide-react';
 
 // ==========================================
 // การตั้งค่าบล็อกตารางเริ่มต้น (แยกเป็นโซนๆ แก้ปัญหาการเว้นบรรทัด)
@@ -13,7 +13,27 @@ const DEFAULT_BLOCKS = [
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('scan'); 
-  const [answerKey, setAnswerKey] = useState(Array(20).fill(null));
+  
+  // ระบบจัดการเฉลยแบบ Auto-Save
+  const [answerKey, setAnswerKey] = useState(() => {
+    const saved = localStorage.getItem('omr_answer_key');
+    return saved ? JSON.parse(saved) : Array(20).fill(null);
+  });
+  
+  const [subjectName, setSubjectName] = useState(() => {
+    return localStorage.getItem('omr_subject_name') || 'วิชาการออกแบบและเทคโนโลยี ว33106';
+  });
+  
+  const updateAnswerKey = (newKeys) => {
+    setAnswerKey(newKeys);
+    answerKeyRef.current = newKeys; // อัปเดต Ref ทันทีป้องกันปัญหา Sync
+    localStorage.setItem('omr_answer_key', JSON.stringify(newKeys));
+  };
+
+  const updateSubjectName = (val) => {
+    setSubjectName(val);
+    localStorage.setItem('omr_subject_name', val);
+  };
   
   // System & OpenCV State
   const [cvReady, setCvReady] = useState(false);
@@ -64,7 +84,7 @@ export default function App() {
   }, []);
 
   useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
-  useEffect(() => { answerKeyRef.current = answerKey; }, [answerKey]);
+  // ไม่ต้องใช้ useEffect เพื่ออัปเดต answerKeyRef แล้วเพราะทำในฟังก์ชัน updateAnswerKey โดยตรง
 
   // ==========================================
   // จัดการกล้อง
@@ -110,18 +130,16 @@ export default function App() {
     
     cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY, 0);
 
-    // ฟังก์ชันย่อยหาจุดศูนย์ถ่วงความดำในโซน
     const getDarkestBlobCenter = (xPct, yPct, wPct, hPct) => {
       const sx = Math.floor(xPct * w), sy = Math.floor(yPct * h);
       const ew = Math.floor(wPct * w), eh = Math.floor(hPct * h);
       
       let sumX = 0, sumY = 0, count = 0;
       
-      // สแกนทีละ 2 pixel เพื่อความเร็ว
       for (let y = sy; y < sy + eh; y += 2) {
         for (let x = sx; x < sx + ew; x += 2) {
           const pixel = gray.ucharPtr(y, x)[0];
-          if (pixel < 85) { // Threshold สีดำ
+          if (pixel < 85) { 
             sumX += x; sumY += y; count++;
           }
         }
@@ -135,13 +153,11 @@ export default function App() {
     };
 
     try {
-      // ค้นหาในระยะ 4 มุม (กว้างพอที่จะให้ผู้ใช้ถือกล้องส่ายไปมาได้)
       const tl = getDarkestBlobCenter(0.02, 0.10, 0.25, 0.20); 
       const tr = getDarkestBlobCenter(0.73, 0.10, 0.25, 0.20); 
       const bl = getDarkestBlobCenter(0.02, 0.70, 0.25, 0.20); 
       const br = getDarkestBlobCenter(0.73, 0.70, 0.25, 0.20); 
 
-      // ตรวจสอบรูปทรงให้แน่ใจว่าเป็นกรอบกระดาษ ไม่ใช่จับเงามั่ว
       if (tl && tr && bl && br) {
         const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
         const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
@@ -149,15 +165,12 @@ export default function App() {
           return { tl, tr, bl, br }; 
         }
       }
-      return { tl, tr, bl, br, isValid: false }; // คืนค่าสถานะมุมที่เจอเพื่อทำ UI
+      return { tl, tr, bl, br, isValid: false }; 
     } finally {
       gray.delete();
     }
   };
 
-  // ==========================================
-  // แปลง Blocks เป็นพิกัดจุดทั้งหมด
-  // ==========================================
   const generateExpectedPoints = (configBlocks) => {
     const points = [];
     configBlocks.forEach(block => {
@@ -181,7 +194,7 @@ export default function App() {
   };
 
   // ==========================================
-  // OMR Engine (ประมวลผลกระดาษ)
+  // OMR Engine (ประมวลผลกระดาษ & ตรวจคำตอบแบบยืดหยุ่น)
   // ==========================================
   const processImageInternal = useCallback((sourceCanvas) => {
     const cv = window.cv;
@@ -196,7 +209,6 @@ export default function App() {
         src = cv.imread(sourceCanvas);
         const markersResult = findMarkersInZones(src);
         
-        // ถ้าไม่ครบ 4 มุม
         if (!markersResult.tl || !markersResult.tr || !markersResult.bl || !markersResult.br) {
           alert("ภาพไม่ชัดเจน ระบบไม่สามารถล็อก 4 มุมกระดาษได้ โปรดถ่ายในที่สว่างและเห็นมุมครบ");
           setIsProcessing(false);
@@ -204,7 +216,6 @@ export default function App() {
           return;
         }
 
-        // 1. Perspective Transform (ยืดกระดาษให้ตรงเป๊ะ ขนาด 800x1131)
         const WARP_W = 800, WARP_H = 1131;
         warped = new cv.Mat();
         
@@ -225,12 +236,9 @@ export default function App() {
         cv.imshow(displayCanvas, warped);
         setWarpedImageUrl(displayCanvas.toDataURL('image/jpeg', 0.9));
 
-        // 2. วิเคราะห์รอยดินสอ
         warpedGray = new cv.Mat();
         warpedThresh = new cv.Mat();
         cv.cvtColor(warped, warpedGray, cv.COLOR_RGBA2GRAY, 0);
-        
-        // Adaptive Threshold เพื่อสู้เงาสะท้อน (ลบเงา ดึงเฉพาะรอยดินสอ)
         cv.adaptiveThreshold(warpedGray, warpedThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 15);
 
         const analyzeBubble = (u, v) => {
@@ -241,7 +249,6 @@ export default function App() {
           let roiRect = new cv.Rect(Math.max(0, x - radius), Math.max(0, y - radius), radius * 2, radius * 2);
           let roi = warpedThresh.roi(roiRect);
           
-          // นับจำนวนพิกเซลสีดำ
           let nonZero = cv.countNonZero(roi);
           let total = roi.rows * roi.cols;
           let density = total > 0 ? nonZero / total : 0;
@@ -268,18 +275,15 @@ export default function App() {
           }
         });
 
-        // สรุปผลคำตอบ
         Object.keys(optionsData).forEach(q => {
           const options = optionsData[q];
           options.sort((a, b) => b.density - a.density); 
           const darkest = options[0];
-          // เกณฑ์ความเข้มของการฝน
           if (darkest.density > 0.12) {
             detectedAnswers[q] = OPTIONS[darkest.opt];
           }
         });
 
-        // สรุปผลรหัส
         Object.keys(idData).forEach(d => {
           const options = idData[d];
           options.sort((a, b) => b.density - a.density);
@@ -289,21 +293,22 @@ export default function App() {
           }
         });
 
-        // หากยังไม่ได้ตั้งเฉลย ให้แค่โชว์พิกัด
-        if (answerKeyRef.current.includes(null)) {
-          alert("สแกนสำเร็จ แต่ยังไม่ได้ตั้งเฉลย ระบบจะแสดงเฉพาะพิกัดที่อ่านได้");
-          setScanResult({ studentId: idValues.join(''), score: 0, total: 20, details: [], radarPoints: points, missingKey: true });
-          setIsProcessing(false);
-          setActiveTab('results');
-          return;
-        }
-
+        // คิดคะแนนแบบ ยืดหยุ่น (ตรวจเฉพาะข้อที่มีการตั้งเฉลยไว้)
         let score = 0;
+        let totalGraded = 0;
         const details = [];
+        const keys = answerKeyRef.current;
+        const isKeyEmpty = keys.every(k => k === null); // เช็คว่าไม่ได้ตั้งเฉลยเลยแม้แต่ข้อเดียว
         
         for (let i = 0; i < 20; i++) {
-          const isCorrect = detectedAnswers[i] === answerKeyRef.current[i];
-          if (isCorrect) score++;
+          const isGraded = keys[i] !== null; // ข้อนี้ถูกตั้งเฉลยไว้หรือไม่
+          let isCorrect = false;
+
+          if (isGraded) {
+            totalGraded++;
+            isCorrect = detectedAnswers[i] === keys[i];
+            if (isCorrect) score++;
+          }
           
           let box = null;
           if (detectedAnswers[i]) {
@@ -311,11 +316,24 @@ export default function App() {
             const pt = optionsData[i].find(o => o.opt === optIdx);
             if (pt) box = { x: pt.u - 0.015, y: pt.v - 0.011, w: 0.03, h: 0.022 };
           }
-          details.push({ qNumber: i + 1, studentAns: detectedAnswers[i], correctAns: answerKeyRef.current[i], isCorrect, box });
+          
+          details.push({ 
+            qNumber: i + 1, 
+            studentAns: detectedAnswers[i], 
+            correctAns: keys[i] || '-', 
+            isCorrect, 
+            box,
+            isGraded // ส่ง state ว่าข้อนี้ถูกนำมาคิดคะแนนไหม ไปให้ UI ด้วย
+          });
         }
 
         setScanResult({
-          studentId: idValues.join(''), score, total: 20, details, radarPoints: points, missingKey: false 
+          studentId: idValues.join(''), 
+          score, 
+          total: totalGraded,  // เอาเฉพาะจำนวนข้อที่ตรวจ
+          details, 
+          radarPoints: points, 
+          missingKey: isKeyEmpty 
         });
         
         setIsProcessing(false);
@@ -378,10 +396,8 @@ export default function App() {
         tl: !!markers.tl, tr: !!markers.tr, bl: !!markers.bl, br: !!markers.br
       });
 
-      // ถ้าเจอครบ 4 มุม ให้นับเฟรม
       if (markers.tl && markers.tr && markers.bl && markers.br && markers.isValid !== false) {
         stableFramesCount.current++;
-        // นิ่งแค่ 8 เฟรม (ถ่ายเร็วมากแบบ ZipGrade)
         if (stableFramesCount.current > 8) {
           stableFramesCount.current = 0;
           captureAndProcess(); 
@@ -443,14 +459,23 @@ export default function App() {
   }
 
   const renderKeysTab = () => (
-    <div className="p-4 max-w-4xl mx-auto bg-white rounded-2xl shadow-sm pb-24">
-      <div className="flex justify-between items-center mb-6">
+    <div className="p-4 max-w-4xl mx-auto bg-white rounded-2xl shadow-sm pb-24 mt-4">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 space-y-4 sm:space-y-0">
         <h2 className="text-2xl font-extrabold text-slate-800">1. ตั้งค่าเฉลย</h2>
-        <button onClick={() => setAnswerKey(Array(20).fill(null).map(() => OPTIONS[Math.floor(Math.random() * 5)]))} className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-4 rounded-full font-medium transition">สุ่มเฉลยด่วน</button>
+        <div className="flex space-x-2">
+          <button onClick={() => updateAnswerKey(Array(20).fill(null))} className="text-sm bg-rose-50 hover:bg-rose-100 text-rose-600 py-2 px-4 rounded-full font-bold transition">ล้างข้อมูล</button>
+          <button onClick={() => updateAnswerKey(Array(20).fill(null).map(() => OPTIONS[Math.floor(Math.random() * 5)]))} className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-4 rounded-full font-bold transition">สุ่มเฉลยด่วน</button>
+        </div>
       </div>
+      
+      <div className="mb-6 bg-blue-50 p-4 rounded-xl border border-blue-100 flex items-start">
+         <AlertCircle className="w-5 h-5 text-blue-500 mr-2 flex-shrink-0 mt-0.5" />
+         <p className="text-sm text-blue-800"><b>ระบบจำเฉลยอัตโนมัติ:</b> คุณสามารถทำเฉลยเฉพาะบางข้อได้ เช่น 5 ข้อแรก แล้วกดสแกนเลย ระบบจะคิดคะแนนเฉพาะ 5 ข้อนั้นให้ทันที</p>
+      </div>
+
       <div className="mb-6">
         <label className="block text-sm font-semibold text-slate-600 mb-2">ชื่อแบบทดสอบ</label>
-        <input type="text" value={subjectName} onChange={(e) => setSubjectName(e.target.value)} className="w-full p-4 bg-slate-50 border-0 rounded-xl focus:ring-2 focus:ring-emerald-500 font-medium" />
+        <input type="text" value={subjectName} onChange={(e) => updateSubjectName(e.target.value)} className="w-full p-4 bg-slate-50 border-0 rounded-xl focus:ring-2 focus:ring-emerald-500 font-medium" />
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {[0, 1].map(col => (
@@ -462,7 +487,7 @@ export default function App() {
                   <span className="w-8 font-bold text-slate-400 text-right">{qNum + 1}.</span>
                   <div className="flex space-x-1 sm:space-x-2">
                     {OPTIONS.map(opt => (
-                      <button key={opt} onClick={() => { const newKeys = [...answerKey]; newKeys[qNum] = opt; setAnswerKey(newKeys); }} 
+                      <button key={opt} onClick={() => { const newKeys = [...answerKey]; newKeys[qNum] = opt; updateAnswerKey(newKeys); }} 
                         className={`w-10 h-10 rounded-full font-bold transition-all ${ answerKey[qNum] === opt ? 'bg-emerald-500 text-white shadow-lg scale-110' : 'bg-white border-2 border-slate-200 text-slate-400 hover:border-emerald-300' }`}>
                         {opt}
                       </button>
@@ -489,12 +514,8 @@ export default function App() {
           <>
             <video ref={videoRef} autoPlay playsInline muted className="absolute w-full h-full object-cover" />
             
-            {/* Viewfinder UI แบบ ZipGrade */}
             <div className="absolute inset-0 pointer-events-none">
-              {/* Overlay ทำให้รอบนอกมืดลงนิดนึง เน้นตรงกลาง */}
               <div className="absolute inset-0 shadow-[0_0_0_9999px_rgba(0,0,0,0.4)] pointer-events-none rounded-xl m-4"></div>
-              
-              {/* เป้าเล็ง 4 มุม (Target Circles) */}
               <div className={`absolute top-[16%] left-[10%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.tl ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
               <div className={`absolute top-[16%] left-[90%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.tr ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
               <div className={`absolute top-[84%] left-[10%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.bl ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
@@ -539,13 +560,13 @@ export default function App() {
     const expectedPoints = generateExpectedPoints(blocks);
 
     return (
-      <div className="p-4 max-w-6xl mx-auto bg-slate-50 rounded-2xl pb-24">
+      <div className="p-4 max-w-6xl mx-auto bg-slate-50 rounded-2xl pb-24 mt-4">
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h2 className="text-2xl font-extrabold text-slate-800 flex items-center"><LayoutGrid className="w-6 h-6 mr-2 text-emerald-500" /> สร้างเทมเพลต (Template Editor)</h2>
             <p className="text-slate-500 text-sm mt-1">ปรับตารางจุดสีน้ำเงินให้ตรงกับวงกลมกระดาษ (ลากปรับบล็อกซ้าย-ขวา)</p>
           </div>
-          <button onClick={() => { saveGridConfig(blocks); alert('บันทึกเทมเพลตสำเร็จ! การสแกนครั้งต่อไปจะใช้เทมเพลตนี้'); }} className="bg-slate-800 text-white font-bold py-2 px-6 rounded-full flex items-center shadow-lg hover:bg-black transition"><Save className="w-4 h-4 mr-2"/> บันทึก</button>
+          <button onClick={() => { localStorage.setItem('omr_blocks_config', JSON.stringify(blocks)); alert('บันทึกเทมเพลตสำเร็จ! การสแกนครั้งต่อไปจะใช้เทมเพลตนี้'); }} className="bg-slate-800 text-white font-bold py-2 px-6 rounded-full flex items-center shadow-lg hover:bg-black transition"><Save className="w-4 h-4 mr-2"/> บันทึก</button>
         </div>
         
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -590,7 +611,7 @@ export default function App() {
                const ctx = canvas.getContext('2d');
                const img = new Image(); img.onload = () => { ctx.drawImage(img,0,0,800,1131); processImageInternal(canvas); };
                img.src = warpedImageUrl; 
-            }} className="w-full bg-emerald-50 text-emerald-700 font-bold py-4 rounded-xl border border-emerald-200 hover:bg-emerald-100 transition flex items-center justify-center">
+            }} className="w-full bg-emerald-50 text-emerald-700 font-bold py-4 rounded-xl border border-emerald-200 hover:bg-emerald-100 transition flex items-center justify-center shadow-sm">
               <RefreshCw className="w-5 h-5 mr-2" /> ทดสอบตรวจแผ่นนี้ใหม่ด้วยเทมเพลตปัจจุบัน
             </button>
           </div>
@@ -603,11 +624,15 @@ export default function App() {
     if (!scanResult) return null;
 
     return (
-      <div className="p-4 sm:p-6 max-w-5xl mx-auto bg-white rounded-2xl shadow-sm pb-24">
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto bg-white rounded-2xl shadow-sm pb-24 mt-4">
+        
         {scanResult.missingKey && (
-          <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-xl mb-6 flex items-center">
-            <AlertCircle className="w-6 h-6 mr-3 flex-shrink-0" />
-            <p className="text-sm font-medium">ยังไม่ได้ตั้งเฉลย ระบบจึงแสดงเฉพาะ "จุดสีน้ำเงิน" (พิกัดการอ่าน) และรหัสนักเรียน เพื่อให้คุณตรวจสอบความถูกต้องของเทมเพลตเท่านั้น</p>
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-xl mb-6 flex items-start shadow-sm">
+            <AlertCircle className="w-6 h-6 mr-3 flex-shrink-0 mt-0.5" />
+            <div>
+              <h4 className="font-bold">ตรวจสอบความถูกต้องการสแกน</h4>
+              <p className="text-sm font-medium mt-1">ระบบตรวจพบรอยดินสอดังภาพด้านล่าง (ไม่คิดคะแนนเนื่องจากยังไม่มีการตั้งเฉลยครับ)</p>
+            </div>
           </div>
         )}
 
@@ -618,17 +643,21 @@ export default function App() {
                 <>
                   <img src={warpedImageUrl} alt="Warped" className="absolute top-0 left-0 w-full h-full object-cover" />
                   
-                  {/* Radar Points */}
                   {scanResult.radarPoints && scanResult.radarPoints.map((pt, idx) => (
-                    <div key={`radar-${idx}`} className="absolute w-1.5 h-1.5 bg-blue-500/80 rounded-full transform -translate-x-1/2 -translate-y-1/2" style={{ left: `${pt.u * 100}%`, top: `${pt.v * 100}%` }}></div>
+                    <div key={`radar-${idx}`} className="absolute w-1 h-1 bg-blue-500/80 rounded-full transform -translate-x-1/2 -translate-y-1/2" style={{ left: `${pt.u * 100}%`, top: `${pt.v * 100}%` }}></div>
                   ))}
 
-                  {/* Highlight Detected Marks */}
-                  {!scanResult.missingKey && scanResult.details.map((item, idx) => {
+                  {scanResult.details.map((item, idx) => {
                     if (!item.box) return null; 
+                    
+                    let ringClass = 'border-slate-400 bg-slate-400/20'; 
+                    if (item.isGraded) {
+                       ringClass = item.isCorrect ? 'border-emerald-500 bg-emerald-500/20' : 'border-rose-500 bg-rose-500/30';
+                    }
+
                     return (
-                      <div key={idx} className={`absolute border-4 rounded-full shadow-sm ${item.isCorrect ? 'border-emerald-500 bg-emerald-500/20' : 'border-rose-500 bg-rose-500/30'}`} style={{ left: `${item.box.x * 100}%`, top: `${item.box.y * 100}%`, width: `${item.box.w * 100}%`, height: `${item.box.h * 100}%` }}>
-                        {!item.isCorrect && <span className="absolute -top-7 left-1/2 transform -translate-x-1/2 bg-rose-600 text-white text-xs font-black px-2 py-0.5 rounded-md shadow">{item.correctAns}</span>}
+                      <div key={idx} className={`absolute border-4 rounded-full shadow-sm ${ringClass}`} style={{ left: `${item.box.x * 100}%`, top: `${item.box.y * 100}%`, width: `${item.box.w * 100}%`, height: `${item.box.h * 100}%` }}>
+                        {item.isGraded && !item.isCorrect && <span className="absolute -top-7 left-1/2 transform -translate-x-1/2 bg-rose-600 text-white text-xs font-black px-2 py-0.5 rounded-md shadow">{item.correctAns}</span>}
                       </div>
                     );
                   })}
@@ -636,7 +665,7 @@ export default function App() {
               )}
             </div>
             <button onClick={() => setActiveTab('template')} className="mt-6 text-sm text-slate-500 hover:text-slate-800 font-medium flex items-center bg-white px-4 py-2 rounded-full shadow-sm border border-slate-200">
-              <Sliders className="w-4 h-4 mr-2"/> พิกัดเบี้ยว? กดสร้างเทมเพลตใหม่
+              <Sliders className="w-4 h-4 mr-2"/> จุดสีน้ำเงินเบี้ยว? สร้างเทมเพลตใหม่
             </button>
           </div>
 
@@ -647,38 +676,44 @@ export default function App() {
                 <p className="text-3xl font-black tracking-widest">{scanResult.studentId}</p>
               </div>
               <div className="text-right">
-                <p className="text-slate-400 font-medium text-sm mb-1">คะแนนรวม</p>
+                <p className="text-slate-400 font-medium text-sm mb-1">คะแนนที่ได้</p>
                 <div className="flex items-baseline">
-                  <span className={`text-5xl font-black ${scanResult.score >= 10 ? 'text-emerald-400' : 'text-rose-400'}`}>{scanResult.score}</span>
-                  <span className="text-xl text-slate-500 ml-1">/20</span>
+                  <span className={`text-5xl font-black ${scanResult.score > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>
+                    {scanResult.missingKey ? '-' : scanResult.score}
+                  </span>
+                  <span className="text-xl text-slate-500 ml-1">/{scanResult.total}</span>
                 </div>
               </div>
             </div>
 
-            {!scanResult.missingKey && (
-              <div className="grid grid-cols-2 gap-3 flex-1 content-start">
-                {scanResult.details.map((item, index) => (
-                  <div key={index} className={`p-3 rounded-xl flex items-center justify-between border-2 text-sm font-medium ${item.isCorrect ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
-                    <span className="text-slate-500 w-6">{item.qNumber}.</span>
-                    <span className="flex-1 text-slate-800 ml-2">ตอบ: <span className="font-black text-lg ml-1">{item.studentAns || '-'}</span></span>
-                    {item.isCorrect ? <CheckCircle className="w-5 h-5 text-emerald-500" /> : <span className="text-rose-600 font-bold bg-white px-2 py-1 rounded-md shadow-sm">เฉลย {item.correctAns}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
+            <div className="grid grid-cols-2 gap-3 flex-1 content-start">
+              {scanResult.details.map((item, index) => (
+                <div key={index} className={`p-3 rounded-xl flex items-center justify-between border-2 text-sm font-medium ${
+                    !item.isGraded ? 'bg-slate-50 border-slate-200' :
+                    item.isCorrect ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'
+                }`}>
+                  <span className="text-slate-500 w-6">{item.qNumber}.</span>
+                  <span className="flex-1 text-slate-800 ml-2">ตอบ: <span className="font-black text-lg ml-1">{item.studentAns || '-'}</span></span>
+                  
+                  {!item.isGraded ? (
+                     <span className="text-slate-400 font-bold text-xs bg-slate-200 px-2 py-1 rounded-md shadow-sm">ไม่ได้เฉลย</span>
+                  ) : item.isCorrect ? (
+                     <CheckCircle className="w-5 h-5 text-emerald-500" />
+                  ) : (
+                     <span className="text-rose-600 font-bold bg-white px-2 py-1 rounded-md shadow-sm">เฉลย {item.correctAns}</span>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
     );
   };
 
-  // ==========================================
-  // BOTTOM NAVIGATION BAR (แบบมือถือ)
-  // ==========================================
   return (
     <div className="min-h-screen bg-slate-100 font-sans">
-      {/* Header */}
-      <header className="bg-white px-6 py-4 shadow-sm sticky top-0 z-50 flex items-center justify-between">
+      <header className="bg-white px-6 py-4 shadow-sm sticky top-0 z-40 flex items-center justify-between">
         <div className="flex items-center text-slate-800 font-black text-xl tracking-tight">
           <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center mr-3">
             <CheckCircle className="w-5 h-5 text-white" />
@@ -686,13 +721,12 @@ export default function App() {
           ZipGrade<span className="text-emerald-500 font-light ml-1">Clone</span>
         </div>
         {activeTab === 'results' && (
-          <button onClick={() => setActiveTab('scan')} className="bg-emerald-500 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center shadow-md">
+          <button onClick={() => setActiveTab('scan')} className="bg-emerald-500 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center shadow-md hover:bg-emerald-600 transition">
             สแกนต่อ <ChevronRight className="w-4 h-4 ml-1"/>
           </button>
         )}
       </header>
 
-      {/* Main Content Area */}
       <main className="w-full">
         {activeTab === 'keys' && renderKeysTab()}
         {activeTab === 'scan' && renderScanTab()}
@@ -700,8 +734,7 @@ export default function App() {
         {activeTab === 'template' && renderTemplateTab()}
       </main>
 
-      {/* Bottom Navigation */}
-      <nav className="fixed bottom-0 w-full bg-white border-t border-slate-200 px-6 py-3 flex justify-between items-center z-50 pb-safe">
+      <nav className="fixed bottom-0 w-full bg-white border-t border-slate-200 px-6 py-4 flex justify-between items-center z-50 shadow-[0_-10px_20px_rgba(0,0,0,0.05)]">
         <button onClick={() => setActiveTab('keys')} className={`flex flex-col items-center flex-1 transition ${activeTab === 'keys' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'}`}>
           <FileText className={`w-6 h-6 mb-1 ${activeTab === 'keys' ? 'fill-emerald-100' : ''}`} />
           <span className="text-[10px] font-bold tracking-wider">เฉลย</span>
