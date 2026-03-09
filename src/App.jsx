@@ -9,7 +9,7 @@ export default function App() {
   // Camera & Image State
   const videoRef = useRef(null);
   const fileInputRef = useRef(null);
-  const streamRef = useRef(null); // ใช้ useRef เพื่อป้องกันไม่ให้ State ถูกล้างระหว่างรีเรนเดอร์
+  const streamRef = useRef(null); 
   const [stream, setStream] = useState(null);
   const [imageSource, setImageSource] = useState(null); 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -28,11 +28,10 @@ export default function App() {
 
   const OPTIONS = ['ก', 'ข', 'ค', 'ง', 'จ'];
 
-  // อัปเดต ref เมื่อ state เปลี่ยน เพื่อให้ function ใน loop นำไปใช้ได้ทันที
   useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
   useEffect(() => { answerKeyRef.current = answerKey; }, [answerKey]);
 
-  // --- ระบบจัดการกล้อง (แก้ปัญหาจอดำ) ---
+  // --- ระบบจัดการกล้อง ---
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
@@ -61,16 +60,14 @@ export default function App() {
     }
   }, []);
 
-  // เปิด/ปิด กล้องอัตโนมัติเมื่อสลับแท็บ
   useEffect(() => {
     if (activeTab === 'scan' && !streamRef.current && imageSource !== 'file') {
       startCamera();
     } else if (activeTab !== 'scan') {
-      stopCamera(); // ปิดกล้องเพื่อประหยัดแบตเตอรี่เมื่ออยู่หน้าอื่น
+      stopCamera(); 
     }
   }, [activeTab, imageSource, startCamera, stopCamera]);
 
-  // ปิดกล้องเมื่อปิดเว็บ
   useEffect(() => {
     return () => stopCamera();
   }, [stopCamera]);
@@ -91,28 +88,38 @@ export default function App() {
         for (let x = sx; x < sx + ew; x += 2) {
           const i = (y * w + x) * 4;
           const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-          if (gray < 100) { 
+          if (gray < 95) { // ปรับให้จับมุมสีดำได้ง่ายขึ้นนิดหน่อย 
             sumX += x; 
             sumY += y; 
             count++;
           }
         }
       }
-      if (count > (ew * eh * 0.01) / 4) { // ถ้าพบจุดดำใหญ่พอสมควร
-        return { x: sumX / count, y: sumY / count }; // ส่งพิกัดจุดศูนย์กลางกลับไป
+      
+      const totalPixels = (ew / 2) * (eh / 2); 
+      if (count > totalPixels * 0.015 && count < totalPixels * 0.30) { 
+        return { x: sumX / count, y: sumY / count };
       }
       return null;
     };
 
-    return {
-      tl: getMarker(0.0, 0.0, 0.35, 0.35),
-      tr: getMarker(0.65, 0.0, 0.35, 0.35),
-      bl: getMarker(0.0, 0.65, 0.35, 0.35),
-      br: getMarker(0.65, 0.65, 0.35, 0.35)
-    };
+    const tl = getMarker(0.0, 0.0, 0.35, 0.35);
+    const tr = getMarker(0.65, 0.0, 0.35, 0.35);
+    const bl = getMarker(0.0, 0.65, 0.35, 0.35);
+    const br = getMarker(0.65, 0.65, 0.35, 0.35);
+
+    if (tl && tr && bl && br) {
+      const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+      const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+      if (topWidth < w * 0.4 || leftHeight < h * 0.4) {
+        return { tl: null, tr: null, bl: null, br: null }; 
+      }
+    }
+
+    return { tl, tr, bl, br };
   };
 
-  // --- OMR Logic (Bilinear Interpolation) คำนวณความเบี้ยว ---
+  // --- OMR Logic (Relative Contrast Analysis) แก้ปัญหาเงาสะท้อนดินสอ ---
   const processImageInternal = useCallback((sourceUrl, canvasWidth, canvasHeight, ctx, markers) => {
     setIsProcessing(true);
     setScanResult(null);
@@ -141,9 +148,10 @@ export default function App() {
       const data = imageData.data;
       const radius = Math.floor(canvasWidth * 0.018); 
 
+      // แทนที่จะนับจุดที่ดำกว่า 130 เราจะ "หาค่าเฉลี่ยความสว่าง" ของช่องนั้นทั้งหมด (0=ดำสุด, 255=ขาวสุด)
       const checkBubble = (u, v) => {
         const center = getInterpolatedPoint(u, v);
-        let darkPixels = 0;
+        let totalGray = 0;
         let totalPixels = 0;
 
         for (let i = Math.floor(center.y - radius); i < center.y + radius; i++) {
@@ -151,13 +159,16 @@ export default function App() {
             if (j >= 0 && j < canvasWidth && i >= 0 && i < canvasHeight) {
               const idx = (i * canvasWidth + j) * 4;
               const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-              if (gray < 130) darkPixels++;
+              totalGray += gray;
               totalPixels++;
             }
           }
         }
+        
+        const avgGray = totalPixels > 0 ? totalGray / totalPixels : 255;
+
         return {
-          darkness: totalPixels > 0 ? darkPixels / totalPixels : 0,
+          avgGray: avgGray, // คืนค่าความสว่างเฉลี่ย
           box: { 
             x: (center.x - radius) / canvasWidth,
             y: (center.y - radius) / canvasHeight,
@@ -177,39 +188,54 @@ export default function App() {
       const U_ID = 0.730; const V_ID = 0.550;
       const U_ID_STEP = 0.053; const V_ID_STEP = 0.046;
 
+      // 1. ตรวจคำตอบ (Q1-20) ด้วยระบบหาช่องที่มืดที่สุด (Relative Contrast)
       for (let q = 0; q < 20; q++) {
-        let maxDarkness = 0;
-        let selectedOption = null;
-        let selectedBox = null;
-        
         const isLeft = q < 15;
         const baseU = isLeft ? U_LEFT : U_RIGHT;
         const v = isLeft ? V_START + (q * V_STEP) : V_START + ((q - 15) * V_STEP);
 
+        let optionsData = [];
+        // เก็บค่าความสว่างของทั้ง 5 ตัวเลือกในข้อนั้น
         for (let opt = 0; opt < 5; opt++) {
           const result = checkBubble(baseU + (opt * U_STEP), v);
-          if (result.darkness > maxDarkness && result.darkness > 0.10) { 
-            maxDarkness = result.darkness;
-            selectedOption = opt;
-            selectedBox = result.box;
-          }
+          optionsData.push({ opt, avgGray: result.avgGray, box: result.box });
         }
-        detectedAnswers[q] = selectedOption !== null ? OPTIONS[selectedOption] : null;
-        detectedBoxes[q] = selectedBox;
+
+        // เรียงลำดับจาก "มืดสุด" (ค่าน้อย) ไป "สว่างสุด" (ค่ามาก)
+        optionsData.sort((a, b) => a.avgGray - b.avgGray);
+        const darkest = optionsData[0]; // ช่องที่มืดที่สุด
+        const lightest = optionsData[optionsData.length - 1]; // ช่องที่สว่างที่สุด
+
+        // ถ้าช่องที่มืดที่สุด มืดกว่าช่องที่สว่างที่สุดเกิน 18 ระดับ (แปลว่ามีการระบายสี แม้จะมีเงาสะท้อน)
+        if (lightest.avgGray - darkest.avgGray > 18) {
+          detectedAnswers[q] = OPTIONS[darkest.opt];
+          detectedBoxes[q] = darkest.box;
+        } else {
+          // ถ้าความต่างน้อยมาก แปลว่ากระดาษเปล่า ไม่ได้ฝนข้อนี้
+          detectedAnswers[q] = null;
+          detectedBoxes[q] = null;
+        }
       }
 
+      // 2. ตรวจรหัสนักเรียนด้วยหลักการเดียวกัน
       for (let digit = 0; digit < 5; digit++) {
-        let maxDarkness = 0;
-        let selectedNumber = "?";
         const u = U_ID + (digit * U_ID_STEP);
+        let optionsData = [];
+        
         for (let num = 0; num < 10; num++) {
           const result = checkBubble(u, V_ID + (num * V_ID_STEP));
-          if (result.darkness > maxDarkness && result.darkness > 0.10) {
-            maxDarkness = result.darkness;
-            selectedNumber = num.toString();
-          }
+          optionsData.push({ num, avgGray: result.avgGray, box: result.box });
         }
-        studentIdStr += selectedNumber;
+        
+        optionsData.sort((a, b) => a.avgGray - b.avgGray);
+        const darkest = optionsData[0];
+        const lightest = optionsData[optionsData.length - 1];
+
+        if (lightest.avgGray - darkest.avgGray > 18) {
+          studentIdStr += darkest.num.toString();
+        } else {
+          studentIdStr += "?";
+        }
       }
 
       let score = 0;
@@ -287,7 +313,7 @@ export default function App() {
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    canvas.width = 150; canvas.height = 200; // ลดขนาดให้คำนวณสดไวที่สุด
+    canvas.width = 150; canvas.height = 200; 
     
     const vW = video.videoWidth; const vH = video.videoHeight;
     const targetRatio = canvas.width / canvas.height;
@@ -307,7 +333,7 @@ export default function App() {
 
     if (markers.tl && markers.tr && markers.bl && markers.br) {
       stableFramesCount.current++;
-      if (stableFramesCount.current > 6 && !answerKeyRef.current.includes(null)) {
+      if (stableFramesCount.current > 15 && !answerKeyRef.current.includes(null)) {
         stableFramesCount.current = 0;
         captureAndProcess(); 
         return; 
@@ -319,7 +345,6 @@ export default function App() {
     animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
   }, [captureAndProcess]);
 
-  // ตั้งค่าวิดีโอให้เล่นและเริ่ม Loop สแกนอัตโนมัติ
   useEffect(() => {
     if (imageSource === 'camera' && stream && videoRef.current) {
       videoRef.current.srcObject = stream;
@@ -447,10 +472,10 @@ export default function App() {
                 
                 {/* 4 โซนตีกรอบกว้างๆ ให้ผู้ใช้เล็งเข้าไป */}
                 <div className="absolute inset-0 pointer-events-none p-4">
-                  <div className={`absolute top-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tl ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
-                  <div className={`absolute top-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tr ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
-                  <div className={`absolute bottom-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.bl ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
-                  <div className={`absolute bottom-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.br ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute top-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tl ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute top-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tr ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute bottom-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.bl ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute bottom-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.br ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
                 </div>
 
                 <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 z-20">
@@ -541,7 +566,7 @@ export default function App() {
                 </>
               )}
             </div>
-            <p className="text-xs text-gray-400 mt-2">* ระบบจำลองพิกัดอัตโนมัติตามความเอียงของกระดาษ</p>
+            <p className="text-xs text-gray-400 mt-2">* ระบบเปรียบเทียบความดำสัมพัทธ์ แก้ปัญหาแสงสะท้อน</p>
           </div>
 
           <div className="order-1 lg:order-2">
