@@ -139,29 +139,34 @@ export default function App() {
       for (let y = sy; y < sy + eh; y += 2) {
         for (let x = sx; x < sx + ew; x += 2) {
           const pixel = gray.ucharPtr(y, x)[0];
-          if (pixel < 85) { 
+          // ปรับเกณฑ์ความดำ (Threshold) ให้อ่อนลง เพื่อจับมุมได้ง่ายขึ้นในที่แสงน้อย
+          if (pixel < 100) { 
             sumX += x; sumY += y; count++;
           }
         }
       }
       
       const area = (ew / 2) * (eh / 2);
-      if (count > area * 0.02 && count < area * 0.40) {
+      // ลดเกณฑ์ขั้นต่ำของการเจอสีดำลงเหลือ 1% (เดิม 2%) เผื่อกระดาษอยู่ไกล
+      // เพิ่มเกณฑ์สูงสุดเป็น 60% (เดิม 40%) เผื่อแสงเงาพาดผ่านมุมกระดาษ
+      if (count > area * 0.01 && count < area * 0.60) {
         return { x: sumX / count, y: sumY / count };
       }
       return null;
     };
 
     try {
-      const tl = getDarkestBlobCenter(0.02, 0.10, 0.25, 0.20); 
-      const tr = getDarkestBlobCenter(0.73, 0.10, 0.25, 0.20); 
-      const bl = getDarkestBlobCenter(0.02, 0.70, 0.25, 0.20); 
-      const br = getDarkestBlobCenter(0.73, 0.70, 0.25, 0.20); 
+      // ขยายพื้นที่โซนค้นหาให้กว้างขึ้นอีกนิด เพื่อให้เล็งง่ายขึ้น
+      const tl = getDarkestBlobCenter(0.0, 0.05, 0.30, 0.25); 
+      const tr = getDarkestBlobCenter(0.70, 0.05, 0.30, 0.25); 
+      const bl = getDarkestBlobCenter(0.0, 0.70, 0.30, 0.25); 
+      const br = getDarkestBlobCenter(0.70, 0.70, 0.30, 0.25); 
 
       if (tl && tr && bl && br) {
         const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
         const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-        if (topWidth > w * 0.4 && leftHeight > h * 0.4) {
+        // ลดเกณฑ์ความกว้างความสูงของรูปสี่เหลี่ยมลง เผื่อผู้ใช้ถือกล้องใกล้/ไกล
+        if (topWidth > w * 0.3 && leftHeight > h * 0.3) {
           return { tl, tr, bl, br }; 
         }
       }
@@ -210,7 +215,7 @@ export default function App() {
         const markersResult = findMarkersInZones(src);
         
         if (!markersResult.tl || !markersResult.tr || !markersResult.bl || !markersResult.br) {
-          alert("ภาพไม่ชัดเจน ระบบไม่สามารถล็อก 4 มุมกระดาษได้ โปรดถ่ายในที่สว่างและเห็นมุมครบ");
+          alert("ภาพไม่ชัดเจน ระบบไม่สามารถล็อก 4 มุมกระดาษได้ โปรดถ่ายในที่สว่างและพยายามจัดให้มุมกระดาษอยู่ในกรอบ");
           setIsProcessing(false);
           startCamera();
           return;
@@ -643,11 +648,13 @@ export default function App() {
                 <>
                   <img src={warpedImageUrl} alt="Warped" className="absolute top-0 left-0 w-full h-full object-cover" />
                   
+                  {/* Radar Points */}
                   {scanResult.radarPoints && scanResult.radarPoints.map((pt, idx) => (
-                    <div key={`radar-${idx}`} className="absolute w-1 h-1 bg-blue-500/80 rounded-full transform -translate-x-1/2 -translate-y-1/2" style={{ left: `${pt.u * 100}%`, top: `${pt.v * 100}%` }}></div>
+                    <div key={`radar-${idx}`} className="absolute w-1.5 h-1.5 bg-blue-500/80 rounded-full transform -translate-x-1/2 -translate-y-1/2" style={{ left: `${pt.u * 100}%`, top: `${pt.v * 100}%` }}></div>
                   ))}
 
-                  {scanResult.details.map((item, idx) => {
+                  {/* Highlight Detected Marks */}
+                  {!scanResult.missingKey && scanResult.details.map((item, idx) => {
                     if (!item.box) return null; 
                     
                     let ringClass = 'border-slate-400 bg-slate-400/20'; 
