@@ -1,49 +1,153 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Camera, Upload, CheckCircle, XCircle, Settings, Play, RefreshCw, Save, AlertCircle } from 'lucide-react';
+import { Camera, Upload, CheckCircle, XCircle, Settings, Play, RefreshCw, Save, AlertCircle, ScanLine } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('scan'); // 'scan', 'keys', 'results'
+  const [activeTab, setActiveTab] = useState('scan'); 
   const [answerKey, setAnswerKey] = useState(Array(20).fill(null));
   const [subjectName, setSubjectName] = useState('วิชาการออกแบบและเทคโนโลยี ว33106');
   
-  // Camera & Image State
+  // Camera & Auto-Scan State
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const [stream, setStream] = useState(null);
-  const [imageSource, setImageSource] = useState(null); // 'camera' or 'file'
+  const [imageSource, setImageSource] = useState(null); 
   const [isProcessing, setIsProcessing] = useState(false);
   const [cameraError, setCameraError] = useState('');
+  
+  // Auto-Scan refs
+  const isProcessingRef = useRef(false);
+  const answerKeyRef = useRef(answerKey);
+  const animationFrameId = useRef(null);
+  const stableFramesCount = useRef(0);
+  
+  // เพิ่มเป็น 6 จุด: Top-Left, Top-Right, Center-Top, Bottom-Left, Bottom-Center, Bottom-Right
+  const [alignedStatus, setAlignedStatus] = useState({ tl: false, tr: false, ct: false, bl: false, bc: false, br: false });
 
   // Result State
   const [scanResult, setScanResult] = useState(null);
+  const [scannedImageUrl, setScannedImageUrl] = useState(null); 
 
   const OPTIONS = ['ก', 'ข', 'ค', 'ง', 'จ'];
-  const NUM_QUESTIONS = 20;
 
-  // เพิ่ม useEffect ตัวนี้เข้าไป เพื่อรอให้แท็กวิดีโอสร้างเสร็จก่อนแล้วค่อยใส่ภาพจากกล้อง
+  useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
+  useEffect(() => { answerKeyRef.current = answerKey; }, [answerKey]);
+
+  // --- Auto Scan Loop (6 Points) ---
+  const checkAlignmentAndScan = useCallback(() => {
+    if (!videoRef.current || isProcessingRef.current || !stream) {
+      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+      return;
+    }
+
+    const video = videoRef.current;
+    if (video.readyState !== 4) {
+      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+      return;
+    }
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    canvas.width = 600;
+    canvas.height = 848; // A4 aspect ratio 1:1.414
+
+    const vW = video.videoWidth;
+    const vH = video.videoHeight;
+    const vRatio = vW / vH;
+    const targetRatio = canvas.width / canvas.height;
+
+    let sX = 0, sY = 0, sW = vW, sH = vH;
+    if (vRatio > targetRatio) {
+      sW = vH * targetRatio;
+      sX = (vW - sW) / 2;
+    } else {
+      sH = vW / targetRatio;
+      sY = (vH - sH) / 2;
+    }
+
+    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+
+    const isDark = (xPct, yPct, wPct, hPct) => {
+      const x = Math.floor(xPct * canvas.width);
+      const y = Math.floor(yPct * canvas.height);
+      const w = Math.floor(wPct * canvas.width);
+      const h = Math.floor(hPct * canvas.height);
+      
+      let darkPixels = 0;
+      let totalPixels = 0;
+
+      for (let i = y; i < y + h; i++) {
+        for (let j = x; j < x + w; j++) {
+          if (j >= 0 && j < canvas.width && i >= 0 && i < canvas.height) {
+            const index = (i * canvas.width + j) * 4;
+            const gray = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+            if (gray < 85) darkPixels++; // ตรวจจับสีดำเข้ม
+            totalPixels++;
+          }
+        }
+      }
+      return (darkPixels / totalPixels) > 0.35; // ความดำต้องเกิน 35% ของพื้นที่กรอบ
+    };
+
+    // พิกัด 6 จุด ตามสี่เหลี่ยมสีดำบนกระดาษ
+    const status = {
+      tl: isDark(0.08, 0.20, 0.04, 0.03), // ซ้ายบน
+      tr: isDark(0.89, 0.20, 0.04, 0.03), // ขวาบน
+      ct: isDark(0.48, 0.32, 0.04, 0.03), // กลางบน (ใต้ช่องเลขที่)
+      bl: isDark(0.08, 0.94, 0.04, 0.03), // ซ้ายล่าง
+      bc: isDark(0.48, 0.94, 0.04, 0.03), // กลางล่าง
+      br: isDark(0.89, 0.94, 0.04, 0.03), // ขวาล่าง
+    };
+
+    setAlignedStatus(status);
+
+    // เช็คว่าตรงทั้ง 6 จุดหรือไม่
+    if (status.tl && status.tr && status.ct && status.bl && status.bc && status.br) {
+      stableFramesCount.current++;
+      // ถ้านิ่งครบ 15 เฟรม (~ครึ่งวินาที) ให้ถ่ายภาพเลย
+      if (stableFramesCount.current > 15 && !answerKeyRef.current.includes(null)) {
+        stableFramesCount.current = 0;
+        const dataUrl = canvas.toDataURL('image/jpeg');
+        processImageInternal(dataUrl, canvas.width, canvas.height, ctx);
+        return; 
+      }
+    } else {
+      stableFramesCount.current = 0;
+    }
+
+    animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+  }, [stream]);
+
   useEffect(() => {
     if (imageSource === 'camera' && stream && videoRef.current) {
       videoRef.current.srcObject = stream;
-      videoRef.current.play().catch(e => console.error("Play error:", e));
+      videoRef.current.play()
+        .then(() => {
+          stableFramesCount.current = 0;
+          animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+        })
+        .catch(e => console.error("Play error:", e));
     }
-  }, [imageSource, stream]);
+    return () => {
+      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+    };
+  }, [imageSource, stream, checkAlignmentAndScan]);
 
-  // --- 1. Camera Handling ---
   const startCamera = async () => {
     setCameraError('');
     try {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      if (stream) stream.getTracks().forEach(track => track.stop());
       const newStream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
+        video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1920 } } 
       });
       setStream(newStream);
       setImageSource('camera');
+      setActiveTab('scan');
     } catch (err) {
-      console.error("Error accessing camera:", err);
-      setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้งานกล้อง หรืออัปโหลดรูปภาพแทน");
+      setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้งาน หรือใช้งานผ่าน HTTPS");
     }
   };
 
@@ -52,37 +156,19 @@ export default function App() {
       stream.getTracks().forEach(track => track.stop());
       setStream(null);
     }
+    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
   };
 
   useEffect(() => {
-    // Cleanup on unmount
     return () => stopCamera();
   }, [stream]);
 
-  // --- 2. File Upload Handling ---
-  const handleFileUpload = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      stopCamera();
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setImageSource(event.target.result);
-        processImage(event.target.result);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  // --- 3. Image Processing (The OMR Logic) ---
-  const processImage = (sourceUrl = null) => {
+  const processImageInternal = (sourceUrl, canvasWidth, canvasHeight, ctx) => {
     setIsProcessing(true);
     setScanResult(null);
+    setScannedImageUrl(sourceUrl);
 
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
-    // Check if we have an answer key set
-    if (answerKey.includes(null)) {
+    if (answerKeyRef.current.includes(null)) {
       alert("กรุณาตั้งค่าเฉลยให้ครบทั้ง 20 ข้อก่อนทำการตรวจ");
       setActiveTab('keys');
       setIsProcessing(false);
@@ -90,72 +176,58 @@ export default function App() {
     }
 
     const analyzePixels = () => {
-      // In a real robust system, we would use OpenCV to find corner markers and warp the image.
-      // For this web approach, we assume the user aligns the paper with our guide.
-      // We use approximate percentage coordinates based on the uploaded template.
-      
-      const width = canvas.width;
-      const height = canvas.height;
-      const imageData = ctx.getImageData(0, 0, width, height);
+      const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
       const data = imageData.data;
 
-      // Helper to calculate darkness of a specific bounding box
-      const getDarkness = (xPct, yPct, wPct, hPct) => {
-        const x = Math.floor(xPct * width);
-        const y = Math.floor(yPct * height);
-        const w = Math.floor(wPct * width);
-        const h = Math.floor(hPct * height);
+      const checkBubble = (xPct, yPct, wPct, hPct) => {
+        const x = Math.floor(xPct * canvasWidth);
+        const y = Math.floor(yPct * canvasHeight);
+        const w = Math.floor(wPct * canvasWidth);
+        const h = Math.floor(hPct * canvasHeight);
         
         let darkPixels = 0;
         let totalPixels = 0;
 
         for (let i = y; i < y + h; i++) {
           for (let j = x; j < x + w; j++) {
-            // Check bounds to prevent errors
-            if (j >= 0 && j < width && i >= 0 && i < height) {
-              const index = (i * width + j) * 4;
-              const r = data[index];
-              const g = data[index + 1];
-              const b = data[index + 2];
-              
-              // Convert to grayscale
-              const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-              
-              // Threshold for "darkness" (pencil mark)
-              if (gray < 100) { 
-                darkPixels++;
-              }
+            if (j >= 0 && j < canvasWidth && i >= 0 && i < canvasHeight) {
+              const index = (i * canvasWidth + j) * 4;
+              const gray = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+              // ปรับให้มีความไวต่อรอยดินสอมากขึ้น (130)
+              if (gray < 130) darkPixels++;
               totalPixels++;
             }
           }
         }
-        return totalPixels > 0 ? darkPixels / totalPixels : 0;
+        return {
+          darkness: totalPixels > 0 ? darkPixels / totalPixels : 0,
+          box: { x: xPct, y: yPct, w: wPct, h: hPct }
+        };
       };
 
       const detectedAnswers = Array(20).fill(null);
+      const detectedBoxes = Array(20).fill(null);
       let studentIdStr = "";
 
-      // Configuration of grid positions based on the provided image template
-      // Left Column (Q1-15)
-      const leftColX = 0.18; // Start X
-      const leftColY = 0.35; // Start Y
-      const colWidth = 0.21 / 5; // Width per option (ก-จ)
-      const rowHeight = 0.58 / 15; // Height per question
+      // พิกัดปรับจูนสำหรับวงกลมคำตอบ
+      const leftColX = 0.20; 
+      const leftColY = 0.355; 
+      const colWidth = 0.043; 
+      const rowHeight = 0.0385; 
 
-      // Right Column (Q16-20)
-      const rightColX = 0.45;
-      const rightColY = 0.35;
+      const rightColX = 0.49;
+      const rightColY = 0.355;
 
-      // Student ID (5 columns, 10 rows)
-      const idX = 0.65;
-      const idY = 0.60;
-      const idColWidth = 0.22 / 5;
-      const idRowHeight = 0.35 / 10;
+      const idX = 0.655;
+      const idY = 0.61;
+      const idColWidth = 0.043;
+      const idRowHeight = 0.035;
 
-      // 1. Detect Answers
+      // 1. ตรวจคำตอบ (Q1-20)
       for (let q = 0; q < 20; q++) {
         let maxDarkness = 0;
         let selectedOption = null;
+        let selectedBox = null;
         
         const isLeft = q < 15;
         const baseX = isLeft ? leftColX : rightColX;
@@ -163,18 +235,20 @@ export default function App() {
 
         for (let opt = 0; opt < 5; opt++) {
           const optX = baseX + (opt * colWidth);
-          // Sample a slightly smaller box in the center of the expected bubble
-          const darkness = getDarkness(optX + 0.005, baseY + 0.005, colWidth * 0.7, rowHeight * 0.7);
+          const result = checkBubble(optX, baseY, colWidth * 0.8, rowHeight * 0.8);
           
-          if (darkness > maxDarkness && darkness > 0.15) { // 0.15 is the minimum threshold to be considered "filled"
-            maxDarkness = darkness;
+          // ลดเกณฑ์ขั้นต่ำลงมานิดหน่อย (0.12) เพื่อให้อ่านดินสอสีอ่อนได้ดีขึ้น แต่ยังคงยึดช่องที่ดำที่สุด
+          if (result.darkness > maxDarkness && result.darkness > 0.12) { 
+            maxDarkness = result.darkness;
             selectedOption = opt;
+            selectedBox = result.box;
           }
         }
         detectedAnswers[q] = selectedOption !== null ? OPTIONS[selectedOption] : null;
+        detectedBoxes[q] = selectedBox;
       }
 
-      // 2. Detect Student ID
+      // 2. ตรวจรหัสนักเรียน
       for (let digit = 0; digit < 5; digit++) {
         let maxDarkness = 0;
         let selectedNumber = "?";
@@ -183,131 +257,109 @@ export default function App() {
           const numX = idX + (digit * idColWidth);
           const numY = idY + (num * idRowHeight);
           
-          const darkness = getDarkness(numX + 0.005, numY + 0.005, idColWidth * 0.7, idRowHeight * 0.7);
-          
-          if (darkness > maxDarkness && darkness > 0.15) {
-            maxDarkness = darkness;
+          const result = checkBubble(numX, numY, idColWidth * 0.8, idRowHeight * 0.8);
+          if (result.darkness > maxDarkness && result.darkness > 0.12) {
+            maxDarkness = result.darkness;
             selectedNumber = num.toString();
           }
         }
         studentIdStr += selectedNumber;
       }
 
-      // 3. Calculate Score
+      // 3. คิดคะแนน
       let score = 0;
       const details = [];
+      const keys = answerKeyRef.current;
+      
       for (let i = 0; i < 20; i++) {
-        const isCorrect = detectedAnswers[i] === answerKey[i];
+        const isCorrect = detectedAnswers[i] === keys[i];
         if (isCorrect) score++;
         details.push({
           qNumber: i + 1,
-          studentAns: detectedAnswers[i] || '-',
-          correctAns: answerKey[i],
-          isCorrect
+          studentAns: detectedAnswers[i],
+          correctAns: keys[i],
+          isCorrect,
+          box: detectedBoxes[i] 
         });
       }
 
       setScanResult({
-        studentId: studentIdStr.includes("?") ? "อ่านรหัสไม่ชัดเจน" : studentIdStr,
+        studentId: studentIdStr.includes("?") ? "อ่านรหัสไม่ชัด" : studentIdStr,
         score,
         total: 20,
         details
       });
       setIsProcessing(false);
       setActiveTab('results');
-      stopCamera(); // Stop camera after successful scan
+      stopCamera(); 
     };
 
-    // Draw image to canvas before analyzing
-    const img = new Image();
-    img.onload = () => {
-      // Force canvas size to a standard ratio (e.g., A4 proportion 1:1.414)
-      canvas.width = 800;
-      canvas.height = 1131;
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      
-      // Simulate slight processing delay for UX
-      setTimeout(analyzePixels, 500); 
-    };
+    setTimeout(analyzePixels, 100); 
+  };
 
-    if (sourceUrl) {
-      img.src = sourceUrl;
-    } else if (videoRef.current) {
-      // Capture from video
-      canvas.width = videoRef.current.videoWidth || 800;
-      canvas.height = videoRef.current.videoHeight || 1131;
-      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      img.src = canvas.toDataURL('image/jpeg'); // Re-trigger via onload to standardize size
+  const handleManualUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      stopCamera();
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 600;
+          canvas.height = 848;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          processImageInternal(canvas.toDataURL('image/jpeg'), canvas.width, canvas.height, ctx);
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
     }
   };
 
-  // --- 4. Answer Key Management ---
-  const handleSetAnswer = (qIndex, option) => {
-    const newKeys = [...answerKey];
-    newKeys[qIndex] = option;
-    setAnswerKey(newKeys);
-  };
-
-  const autoFillMockKeys = () => {
-    // Fill random keys for testing
-    const mockKeys = Array(20).fill(null).map(() => OPTIONS[Math.floor(Math.random() * OPTIONS.length)]);
-    setAnswerKey(mockKeys);
-  };
-
-
-  // ==========================================
-  // UI RENDERERS
-  // ==========================================
-
+  // --- UI Components ---
   const renderKeysTab = () => (
     <div className="p-4 sm:p-6 max-w-4xl mx-auto bg-white rounded-xl shadow-sm border border-gray-100">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-800 flex items-center">
-          <Settings className="w-6 h-6 mr-2 text-indigo-600" />
-          ตั้งค่าเฉลย
+          <Settings className="w-6 h-6 mr-2 text-indigo-600" />ตั้งค่าเฉลย
         </h2>
         <button 
-          onClick={autoFillMockKeys}
+          onClick={() => setAnswerKey(Array(20).fill(null).map(() => OPTIONS[Math.floor(Math.random() * 5)]))}
           className="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 px-4 rounded-lg transition"
         >
-          สุ่มเฉลย (เพื่อทดสอบ)
+          สุ่มเฉลย (ทดสอบ)
         </button>
       </div>
-
+      
       <div className="mb-6">
-        <label className="block text-sm font-medium text-gray-700 mb-2">ชื่อวิชา / รหัสวิชา</label>
+        <label className="block text-sm font-medium text-gray-700 mb-2">ชื่อวิชา</label>
         <input 
-          type="text" 
-          value={subjectName}
-          onChange={(e) => setSubjectName(e.target.value)}
-          className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+          type="text" value={subjectName} onChange={(e) => setSubjectName(e.target.value)}
+          className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
         />
       </div>
 
-      <div className="bg-indigo-50 p-4 rounded-lg mb-6 flex items-start">
-        <AlertCircle className="w-5 h-5 text-indigo-600 mr-2 flex-shrink-0 mt-0.5" />
-        <p className="text-sm text-indigo-800">
-          กรุณาคลิกเลือกตัวเลือกที่ถูกต้องสำหรับแต่ละข้อ ระบบจะใช้ข้อมูลนี้ในการตรวจคะแนน
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        {[0, 1].map(colIndex => (
-          <div key={`col-${colIndex}`} className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+        {[0, 1].map(col => (
+          <div key={`col-${col}`} className="space-y-3">
             {Array(10).fill(null).map((_, i) => {
-              const qNum = (colIndex * 10) + i;
+              const qNum = (col * 10) + i;
               return (
-                <div key={qNum} className="flex items-center p-2 hover:bg-gray-50 rounded-lg transition border-b border-gray-50 last:border-0">
-                  <span className="w-10 font-bold text-gray-700 text-right mr-4">{qNum + 1}.</span>
-                  <div className="flex space-x-2 sm:space-x-3">
+                <div key={qNum} className="flex items-center p-2 hover:bg-gray-50 rounded-lg border-b border-gray-50">
+                  <span className="w-8 font-bold text-gray-700 text-right mr-4">{qNum + 1}.</span>
+                  <div className="flex space-x-2">
                     {OPTIONS.map(opt => (
                       <button
                         key={opt}
-                        onClick={() => handleSetAnswer(qNum, opt)}
+                        onClick={() => {
+                          const newKeys = [...answerKey];
+                          newKeys[qNum] = opt;
+                          setAnswerKey(newKeys);
+                        }}
                         className={`w-10 h-10 rounded-full font-medium transition-all ${
-                          answerKey[qNum] === opt 
-                            ? 'bg-indigo-600 text-white shadow-md transform scale-110' 
-                            : 'bg-white border-2 border-gray-300 text-gray-600 hover:border-indigo-400'
+                          answerKey[qNum] === opt ? 'bg-indigo-600 text-white scale-110 shadow-md' : 'bg-white border-2 border-gray-300 text-gray-600'
                         }`}
                       >
                         {opt}
@@ -320,128 +372,70 @@ export default function App() {
           </div>
         ))}
       </div>
-
-      <div className="mt-8 flex justify-end">
-        <button 
-          onClick={() => {
-            if(answerKey.includes(null)) {
-              alert("กรุณาเลือกเฉลยให้ครบทุกข้อ");
-            } else {
-              setActiveTab('scan');
-            }
-          }}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg shadow-md transition flex items-center"
-        >
-          <Save className="w-5 h-5 mr-2" />
-          บันทึกเฉลยและไปที่หน้าตรวจ
-        </button>
-      </div>
     </div>
   );
 
   const renderScanTab = () => (
     <div className="p-4 sm:p-6 max-w-2xl mx-auto bg-white rounded-xl shadow-sm border border-gray-100 text-center">
       <h2 className="text-2xl font-bold text-gray-800 mb-2 flex items-center justify-center">
-        <Camera className="w-6 h-6 mr-2 text-indigo-600" />
-        ตรวจกระดาษคำตอบ
+        <ScanLine className="w-6 h-6 mr-2 text-indigo-600" />ระบบตรวจอัตโนมัติ (6 จุด)
       </h2>
-      <p className="text-gray-500 mb-6">{subjectName}</p>
+      <p className="text-gray-500 mb-6 text-sm">เล็งสี่เหลี่ยมสีดำบนกระดาษ ให้ตรงกับจุดสีแดง 6 จุดบนหน้าจอ<br/>(เพื่อป้องกันกระดาษโค้งงอ)</p>
 
       {answerKey.includes(null) ? (
         <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-lg mb-6">
           <AlertCircle className="w-12 h-12 mx-auto mb-3 text-red-500" />
-          <h3 className="text-lg font-bold mb-2">ยังไม่ได้ตั้งค่าเฉลย</h3>
-          <p className="mb-4">กรุณาตั้งค่าเฉลยให้ครบทั้ง 20 ข้อก่อนใช้งานระบบตรวจ</p>
-          <button 
-            onClick={() => setActiveTab('keys')}
-            className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-6 rounded-lg transition"
-          >
-            ไปตั้งค่าเฉลย
-          </button>
+          <p className="mb-4">กรุณาตั้งค่าเฉลยให้ครบทั้ง 20 ข้อก่อนใช้งาน</p>
+          <button onClick={() => setActiveTab('keys')} className="bg-red-600 hover:bg-red-700 text-white py-2 px-6 rounded-lg">ไปตั้งค่าเฉลย</button>
         </div>
       ) : (
         <>
-          {/* Camera/Upload Area */}
-          <div className="relative bg-black rounded-xl overflow-hidden shadow-inner aspect-[3/4] max-w-md mx-auto mb-6 flex items-center justify-center group">
+          <div className="relative bg-gray-900 rounded-xl overflow-hidden shadow-inner max-w-sm mx-auto mb-6 aspect-[1/1.414] flex items-center justify-center">
             
             {imageSource === 'camera' && stream ? (
               <>
-                <video 
-                  ref={videoRef} 
-                  autoPlay 
-                  playsInline 
-                  muted
-                  className="w-full h-full object-cover"
-                />
-                {/* Alignment Guide Overlay */}
-                <div className="absolute inset-0 pointer-events-none border-4 border-dashed border-indigo-400 opacity-50 m-4 rounded-lg"></div>
-                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white/50 text-sm font-medium pointer-events-none">
-                  จัดขอบกระดาษให้อยู่ในกรอบ
+                <video ref={videoRef} autoPlay playsInline muted className="absolute w-full h-full object-cover" />
+                
+                {/* 6 Alignment Guides Overlay */}
+                <div className="absolute inset-0 pointer-events-none">
+                  {/* กรอบซ้าย-ขวา บน */}
+                  <div className={`absolute top-[20%] left-[8%] w-6 h-6 border-2 transition-colors ${alignedStatus.tl ? 'border-green-500 bg-green-500/30' : 'border-red-500'}`}></div>
+                  <div className={`absolute top-[20%] right-[7%] w-6 h-6 border-2 transition-colors ${alignedStatus.tr ? 'border-green-500 bg-green-500/30' : 'border-red-500'}`}></div>
+                  
+                  {/* กรอบกลาง บน (ใต้เลขที่) */}
+                  <div className={`absolute top-[32%] left-[48%] w-6 h-6 border-2 transition-colors ${alignedStatus.ct ? 'border-green-500 bg-green-500/30' : 'border-red-500'}`}></div>
+                  
+                  {/* กรอบซ้าย-กลาง-ขวา ล่าง */}
+                  <div className={`absolute top-[94%] left-[8%] w-6 h-6 border-2 transition-colors ${alignedStatus.bl ? 'border-green-500 bg-green-500/30' : 'border-red-500'}`}></div>
+                  <div className={`absolute top-[94%] left-[48%] w-6 h-6 border-2 transition-colors ${alignedStatus.bc ? 'border-green-500 bg-green-500/30' : 'border-red-500'}`}></div>
+                  <div className={`absolute top-[94%] right-[7%] w-6 h-6 border-2 transition-colors ${alignedStatus.br ? 'border-green-500 bg-green-500/30' : 'border-red-500'}`}></div>
                 </div>
+
+                {isProcessing && (
+                  <div className="absolute inset-0 bg-indigo-900/80 flex flex-col items-center justify-center z-10 backdrop-blur-sm">
+                    <RefreshCw className="w-12 h-12 text-white animate-spin mb-4" />
+                    <p className="text-white font-bold text-lg">กำลังประมวลผลกระดาษ...</p>
+                  </div>
+                )}
               </>
-            ) : typeof imageSource === 'string' ? (
-              <img src={imageSource} alt="Uploaded sheet" className="w-full h-full object-contain bg-gray-900" />
             ) : (
               <div className="text-gray-400 flex flex-col items-center">
                 <Camera className="w-16 h-16 mb-4 opacity-50" />
-                <p>เปิดกล้องหรืออัปโหลดรูปภาพ</p>
-                <p className="text-sm mt-2 opacity-70">(แนะนำให้ถ่ายในที่สว่างและวางกระดาษให้ตรง)</p>
-              </div>
-            )}
-
-            {isProcessing && (
-              <div className="absolute inset-0 bg-indigo-900/80 flex flex-col items-center justify-center z-10">
-                <RefreshCw className="w-12 h-12 text-white animate-spin mb-4" />
-                <p className="text-white font-bold text-lg">กำลังประมวลผล...</p>
+                <p>กดปุ่มเปิดกล้องด้านล่าง</p>
               </div>
             )}
           </div>
 
-          {/* Hidden Canvas for processing */}
-          <canvas ref={canvasRef} className="hidden" />
-          
-          {cameraError && (
-            <div className="text-red-500 text-sm mb-4 bg-red-50 p-3 rounded-lg border border-red-200">
-              {cameraError}
-            </div>
-          )}
-
-          {/* Action Buttons */}
           <div className="flex flex-col sm:flex-row justify-center space-y-3 sm:space-y-0 sm:space-x-4">
-            {imageSource === 'camera' && stream ? (
-              <button 
-                onClick={() => processImage()}
-                disabled={isProcessing}
-                className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-lg shadow-md transition flex items-center justify-center disabled:opacity-50"
-              >
-                <Play className="w-5 h-5 mr-2" />
-                ถ่ายและตรวจทันที
-              </button>
-            ) : (
-              <button 
-                onClick={startCamera}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg shadow-md transition flex items-center justify-center"
-              >
-                <Camera className="w-5 h-5 mr-2" />
-                เปิดกล้องสแกน
+            {imageSource !== 'camera' && (
+              <button onClick={startCamera} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg shadow-md transition flex items-center justify-center">
+                <Camera className="w-5 h-5 mr-2" />เปิดกล้อง (Auto-Scan)
               </button>
             )}
-
             <div className="relative">
-              <input 
-                type="file" 
-                accept="image/*" 
-                capture="environment"
-                ref={fileInputRef}
-                onChange={handleFileUpload}
-                className="hidden"
-              />
-              <button 
-                onClick={() => fileInputRef.current.click()}
-                className="w-full bg-white border-2 border-gray-300 hover:bg-gray-50 text-gray-700 font-bold py-3 px-8 rounded-lg shadow-sm transition flex items-center justify-center"
-              >
-                <Upload className="w-5 h-5 mr-2" />
-                อัปโหลดรูปภาพ
+              <input type="file" accept="image/*" ref={fileInputRef} onChange={handleManualUpload} className="hidden" />
+              <button onClick={() => fileInputRef.current.click()} className="w-full bg-white border-2 border-gray-300 hover:bg-gray-50 text-gray-700 font-bold py-3 px-8 rounded-lg transition flex items-center justify-center">
+                <Upload className="w-5 h-5 mr-2" />อัปโหลดรูปภาพ
               </button>
             </div>
           </div>
@@ -454,78 +448,75 @@ export default function App() {
     if (!scanResult) return null;
 
     return (
-      <div className="p-4 sm:p-6 max-w-3xl mx-auto bg-white rounded-xl shadow-sm border border-gray-100">
-        <div className="text-center mb-8 border-b border-gray-100 pb-6">
-          <h2 className="text-3xl font-bold text-gray-800 mb-2">ผลการตรวจ</h2>
-          <p className="text-gray-500 mb-4">{subjectName}</p>
+      <div className="p-4 sm:p-6 max-w-5xl mx-auto bg-white rounded-xl shadow-sm border border-gray-100">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           
-          <div className="flex flex-col sm:flex-row justify-center items-center gap-6 mt-6">
-            <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100 min-w-[200px]">
-              <p className="text-sm text-indigo-600 font-medium mb-1">รหัสประจำตัวนักเรียน</p>
-              <p className="text-2xl font-black text-indigo-900 tracking-wider">
-                {scanResult.studentId}
-              </p>
+          <div className="order-2 lg:order-1 flex flex-col items-center">
+            <h3 className="font-bold text-lg text-gray-800 mb-4 flex items-center">
+              <ScanLine className="w-5 h-5 mr-2 text-indigo-600" /> ภาพที่ระบบสแกนได้
+            </h3>
+            <div className="relative border-2 border-gray-200 rounded-lg overflow-hidden max-w-sm w-full bg-gray-100 aspect-[1/1.414]">
+              {scannedImageUrl && (
+                <>
+                  <img src={scannedImageUrl} alt="Scanned" className="absolute top-0 left-0 w-full h-full object-cover" />
+                  
+                  {scanResult.details.map((item, idx) => {
+                    if (!item.box) return null; 
+                    return (
+                      <div 
+                        key={idx}
+                        className={`absolute border-[3px] rounded-full shadow-sm ${item.isCorrect ? 'border-green-500 bg-green-500/20' : 'border-red-500 bg-red-500/30'}`}
+                        style={{
+                          left: `${item.box.x * 100}%`,
+                          top: `${item.box.y * 100}%`,
+                          width: `${item.box.w * 100}%`,
+                          height: `${item.box.h * 100}%`,
+                        }}
+                      >
+                        {!item.isCorrect && (
+                          <span className="absolute -top-6 left-1/2 transform -translate-x-1/2 bg-red-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
+                            {item.correctAns}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </div>
-            
-            <div className={`p-4 rounded-xl border min-w-[200px] ${
-              scanResult.score >= 10 ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'
-            }`}>
-              <p className={`text-sm font-medium mb-1 ${
-                scanResult.score >= 10 ? 'text-green-600' : 'text-red-600'
-              }`}>คะแนนที่ได้</p>
-              <p className={`text-4xl font-black ${
-                scanResult.score >= 10 ? 'text-green-700' : 'text-red-700'
-              }`}>
-                {scanResult.score} <span className="text-lg text-gray-500 font-medium">/ {scanResult.total}</span>
-              </p>
-            </div>
+            <p className="text-xs text-gray-400 mt-2">* กรอบสีเขียวคือข้อที่ถูก กรอบสีแดงคือข้อที่ผิด</p>
           </div>
-        </div>
 
-        <div className="mb-6">
-          <h3 className="font-bold text-lg text-gray-800 mb-4">รายละเอียดรายข้อ</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            {scanResult.details.map((item, index) => (
-              <div 
-                key={index} 
-                className={`p-3 rounded-lg flex items-center justify-between border ${
-                  item.isCorrect 
-                    ? 'bg-green-50 border-green-200' 
-                    : 'bg-red-50 border-red-200'
-                }`}
-              >
-                <div className="flex items-center">
-                  <span className="font-bold text-gray-700 mr-2 w-5">{item.qNumber}.</span>
-                  <span className="text-gray-600 font-medium">ตอบ: <span className="text-black">{item.studentAns}</span></span>
+          <div className="order-1 lg:order-2">
+            <div className="text-center mb-6 pb-6 border-b border-gray-100">
+              <h2 className="text-3xl font-bold text-gray-800 mb-2">ผลการตรวจ</h2>
+              <div className="flex justify-center gap-4 mt-6">
+                <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100 w-1/2">
+                  <p className="text-sm text-indigo-600 font-medium mb-1">รหัสประจำตัว</p>
+                  <p className="text-xl font-black text-indigo-900">{scanResult.studentId}</p>
                 </div>
-                {item.isCorrect ? (
-                  <CheckCircle className="w-5 h-5 text-green-500" />
-                ) : (
-                  <div className="flex items-center group relative">
-                    <XCircle className="w-5 h-5 text-red-500" />
-                    {/* Tooltip for wrong answer */}
-                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition whitespace-nowrap">
-                      เฉลย: {item.correctAns}
-                    </div>
-                  </div>
-                )}
+                <div className={`p-4 rounded-xl border w-1/2 ${scanResult.score >= 10 ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}>
+                  <p className="text-sm font-medium mb-1">คะแนนรวม</p>
+                  <p className="text-3xl font-black">{scanResult.score} <span className="text-base text-gray-500 font-medium">/ 20</span></p>
+                </div>
               </div>
-            ))}
-          </div>
-        </div>
+            </div>
 
-        <div className="flex justify-center space-x-4">
-          <button 
-            onClick={() => {
-              setActiveTab('scan');
-              setScanResult(null);
-              setImageSource(null);
-            }}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg shadow-md transition flex items-center"
-          >
-            <RefreshCw className="w-5 h-5 mr-2" />
-            ตรวจแผ่นต่อไป
-          </button>
+            <div className="grid grid-cols-2 gap-3 mb-8">
+              {scanResult.details.map((item, index) => (
+                <div key={index} className={`p-2 rounded-lg flex items-center justify-between border text-sm ${item.isCorrect ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+                  <span className="font-bold w-6">{item.qNumber}.</span>
+                  <span className="flex-1">ตอบ: <b>{item.studentAns || '-'}</b></span>
+                  {item.isCorrect ? <CheckCircle className="w-4 h-4 text-green-500" /> : <span className="text-red-500 font-bold text-xs bg-white px-1 border border-red-100 rounded">เฉลย: {item.correctAns}</span>}
+                </div>
+              ))}
+            </div>
+
+            <button onClick={() => { startCamera(); }} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-8 rounded-lg shadow-md transition flex items-center justify-center text-lg">
+              <Camera className="w-6 h-6 mr-2" />สแกนแผ่นต่อไป
+            </button>
+          </div>
+          
         </div>
       </div>
     );
@@ -533,59 +524,24 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900 pb-12">
-      {/* Header */}
-      <header className="bg-indigo-600 text-white shadow-md">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex flex-col sm:flex-row items-center justify-between">
-          <div className="flex items-center mb-4 sm:mb-0">
-            <div className="bg-white p-2 rounded-lg mr-3">
-              <CheckCircle className="w-6 h-6 text-indigo-600" />
-            </div>
-            <h1 className="text-xl font-bold tracking-wide">OMR Smart Grader</h1>
+      <header className="bg-indigo-600 text-white shadow-md sticky top-0 z-50">
+        <div className="max-w-5xl mx-auto px-4 py-3 flex flex-col sm:flex-row items-center justify-between">
+          <div className="flex items-center font-bold text-lg mb-2 sm:mb-0">
+            <CheckCircle className="w-5 h-5 mr-2 text-indigo-200" /> OMR Auto-Grader
           </div>
-          
-          {/* Tabs Navigation */}
-          <nav className="flex space-x-1 bg-indigo-700 p-1 rounded-lg">
-            <button 
-              onClick={() => setActiveTab('keys')}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition ${
-                activeTab === 'keys' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-100 hover:bg-indigo-600'
-              }`}
-            >
-              ตั้งค่าเฉลย
-            </button>
-            <button 
-              onClick={() => setActiveTab('scan')}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition ${
-                activeTab === 'scan' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-100 hover:bg-indigo-600'
-              }`}
-            >
-              ตรวจข้อสอบ
-            </button>
-            <button 
-              onClick={() => setActiveTab('results')}
-              disabled={!scanResult}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition ${
-                activeTab === 'results' ? 'bg-white text-indigo-700 shadow' : 
-                !scanResult ? 'text-indigo-300 opacity-50 cursor-not-allowed' : 'text-indigo-100 hover:bg-indigo-600'
-              }`}
-            >
-              ผลลัพธ์
-            </button>
+          <nav className="flex space-x-1 bg-indigo-700 p-1 rounded-lg text-sm">
+            <button onClick={() => setActiveTab('keys')} className={`px-3 py-1.5 rounded-md transition ${activeTab === 'keys' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-100 hover:bg-indigo-600'}`}>เฉลย</button>
+            <button onClick={() => { setActiveTab('scan'); if(!stream) startCamera(); }} className={`px-3 py-1.5 rounded-md transition ${activeTab === 'scan' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-100 hover:bg-indigo-600'}`}>สแกน</button>
+            <button onClick={() => setActiveTab('results')} disabled={!scanResult} className={`px-3 py-1.5 rounded-md transition ${activeTab === 'results' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-300 opacity-50 cursor-not-allowed'}`}>ผลลัพธ์</button>
           </nav>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-5xl mx-auto px-4 py-8">
+      <main className="max-w-5xl mx-auto px-4 py-6">
         {activeTab === 'keys' && renderKeysTab()}
         {activeTab === 'scan' && renderScanTab()}
         {activeTab === 'results' && renderResultsTab()}
       </main>
-      
-      {/* Footer Instructions */}
-      <footer className="max-w-3xl mx-auto px-4 text-center text-gray-500 text-sm">
-        <p><strong>คำแนะนำ:</strong> เพื่อความแม่นยำสูงสุด ควรวางกระดาษคำตอบบนพื้นเรียบ มีแสงสว่างเพียงพอ และถ่ายรูปให้ขอบกระดาษขนานกับขอบหน้าจอมากที่สุด หลีกเลี่ยงเงาสะท้อน</p>
-      </footer>
     </div>
   );
 }
