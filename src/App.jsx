@@ -6,22 +6,20 @@ export default function App() {
   const [answerKey, setAnswerKey] = useState(Array(20).fill(null));
   const [subjectName, setSubjectName] = useState('วิชาการออกแบบและเทคโนโลยี ว33106');
   
-  // Camera & Auto-Scan State
+  // Camera & Image State
   const videoRef = useRef(null);
   const fileInputRef = useRef(null);
+  const streamRef = useRef(null); // ใช้ useRef เพื่อป้องกันไม่ให้ State ถูกล้างระหว่างรีเรนเดอร์
   const [stream, setStream] = useState(null);
   const [imageSource, setImageSource] = useState(null); 
   const [isProcessing, setIsProcessing] = useState(false);
   const [cameraError, setCameraError] = useState('');
   
-  // Refs
+  // OMR Process Refs
   const isProcessingRef = useRef(false);
   const answerKeyRef = useRef(answerKey);
   const animationFrameId = useRef(null);
   const stableFramesCount = useRef(0);
-  const isStartingCamera = useRef(false);
-  
-  // สถานะ 4 มุม (ใช้สำหรับแสดงผลกรอบบนหน้าจอ)
   const [alignedStatus, setAlignedStatus] = useState({ tl: false, tr: false, bl: false, br: false });
 
   // Result State
@@ -30,55 +28,57 @@ export default function App() {
 
   const OPTIONS = ['ก', 'ข', 'ค', 'ง', 'จ'];
 
+  // อัปเดต ref เมื่อ state เปลี่ยน เพื่อให้ function ใน loop นำไปใช้ได้ทันที
   useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
   useEffect(() => { answerKeyRef.current = answerKey; }, [answerKey]);
 
-  // --- เริ่มต้นกล้องอัตโนมัติเมื่ออยู่หน้าสแกน ---
-  const startCamera = async () => {
-    if (isStartingCamera.current) return;
-    isStartingCamera.current = true;
+  // --- ระบบจัดการกล้อง (แก้ปัญหาจอดำ) ---
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    setStream(null);
+    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+  }, []);
+
+  const startCamera = useCallback(async () => {
     setCameraError('');
     try {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
       }
       const newStream = await navigator.mediaDevices.getUserMedia({ 
         video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1920 } } 
       });
+      streamRef.current = newStream;
       setStream(newStream);
       setImageSource('camera');
       setActiveTab('scan');
     } catch (err) {
       console.error(err);
       setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้งานกล้อง");
-    } finally {
-      isStartingCamera.current = false;
     }
-  };
+  }, []);
 
-  const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
-    }
-    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
-  };
-
+  // เปิด/ปิด กล้องอัตโนมัติเมื่อสลับแท็บ
   useEffect(() => {
-    if (activeTab === 'scan' && !stream && imageSource !== 'file') {
+    if (activeTab === 'scan' && !streamRef.current && imageSource !== 'file') {
       startCamera();
+    } else if (activeTab !== 'scan') {
+      stopCamera(); // ปิดกล้องเพื่อประหยัดแบตเตอรี่เมื่ออยู่หน้าอื่น
     }
-  }, [activeTab]);
+  }, [activeTab, imageSource, startCamera, stopCamera]);
 
+  // ปิดกล้องเมื่อปิดเว็บ
   useEffect(() => {
     return () => stopCamera();
-  }, [stream]);
+  }, [stopCamera]);
 
-  // --- ฟังก์ชันค้นหาจุดอ้างอิง 4 มุม (หาจุดศูนย์กลางของสีดำ) ---
+  // --- ฟังก์ชันวิเคราะห์จุดอ้างอิง 4 มุม ---
   const extractMarkers = (ctx, w, h) => {
     const data = ctx.getImageData(0, 0, w, h).data;
     
-    // ค้นหาในพื้นที่ที่กำหนด แล้วหาพิกัดเฉลี่ยของพิกเซลที่ดำที่สุด
     const getMarker = (xPct, yPct, wPct, hPct) => {
       const sx = Math.floor(xPct * w);
       const sy = Math.floor(yPct * h);
@@ -87,26 +87,23 @@ export default function App() {
       
       let sumX = 0, sumY = 0, count = 0;
       
-      // Step by 2 เพื่อให้ประมวลผลเร็วขึ้น
       for (let y = sy; y < sy + eh; y += 2) {
         for (let x = sx; x < sx + ew; x += 2) {
           const i = (y * w + x) * 4;
           const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-          if (gray < 90) { // เกณฑ์ความดำของสี่เหลี่ยมมุม
+          if (gray < 100) { 
             sumX += x; 
             sumY += y; 
             count++;
           }
         }
       }
-      // ถ้าพบกลุ่มก้อนสีดำใหญ่พอ (ประมาณ 1.5% ของพื้นที่ค้นหา)
-      if (count > (ew * eh * 0.015) / 4) {
-        return { x: sumX / count, y: sumY / count }; // คืนค่าพิกัดจุดศูนย์กลางที่แท้จริง
+      if (count > (ew * eh * 0.01) / 4) { // ถ้าพบจุดดำใหญ่พอสมควร
+        return { x: sumX / count, y: sumY / count }; // ส่งพิกัดจุดศูนย์กลางกลับไป
       }
       return null;
     };
 
-    // ค้นหา 4 มุม ในรัศมี 35% ของแต่ละมุม (พื้นที่กว้างมาก วางเบี้ยวได้สบาย)
     return {
       tl: getMarker(0.0, 0.0, 0.35, 0.35),
       tr: getMarker(0.65, 0.0, 0.35, 0.35),
@@ -115,123 +112,8 @@ export default function App() {
     };
   };
 
-  // --- Auto Scan Loop ---
-  const checkAlignmentAndScan = useCallback(() => {
-    if (!videoRef.current || isProcessingRef.current || !stream) {
-      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-      return;
-    }
-
-    const video = videoRef.current;
-    if (video.readyState !== 4) {
-      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-      return;
-    }
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
-    // ความละเอียดลดลงครึ่งหนึ่งเพื่อความรวดเร็วในการจับภาพสด
-    canvas.width = 300;
-    canvas.height = 400; 
-
-    const vW = video.videoWidth;
-    const vH = video.videoHeight;
-    const vRatio = vW / vH;
-    const targetRatio = canvas.width / canvas.height;
-
-    let sX = 0, sY = 0, sW = vW, sH = vH;
-    if (vRatio > targetRatio) {
-      sW = vH * targetRatio;
-      sX = (vW - sW) / 2;
-    } else {
-      sH = vW / targetRatio;
-      sY = (vH - sH) / 2;
-    }
-
-    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
-    
-    // ตรวจหาจุด 4 มุม
-    const markers = extractMarkers(ctx, canvas.width, canvas.height);
-    
-    setAlignedStatus({
-      tl: !!markers.tl,
-      tr: !!markers.tr,
-      bl: !!markers.bl,
-      br: !!markers.br
-    });
-
-    if (markers.tl && markers.tr && markers.bl && markers.br) {
-      stableFramesCount.current++;
-      // นิ่งแค่ 5 เฟรม ก็ถ่ายเลย เพราะระบบมีความแม่นยำสูงแล้ว
-      if (stableFramesCount.current > 5 && !answerKeyRef.current.includes(null)) {
-        stableFramesCount.current = 0;
-        captureAndProcess(); 
-        return; 
-      }
-    } else {
-      stableFramesCount.current = 0;
-    }
-
-    animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-  }, [stream]);
-
-  // ฟังก์ชันถ่ายภาพและประมวลผล
-  const captureAndProcess = useCallback(() => {
-    if (!videoRef.current || isProcessingRef.current) return;
-    
-    const video = videoRef.current;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
-    // ตอนประมวลผลจริง ใช้ความละเอียดสูง
-    canvas.width = 600;
-    canvas.height = 800; 
-
-    const vW = video.videoWidth;
-    const vH = video.videoHeight;
-    const vRatio = vW / vH;
-    const targetRatio = canvas.width / canvas.height;
-
-    let sX = 0, sY = 0, sW = vW, sH = vH;
-    if (vRatio > targetRatio) {
-      sW = vH * targetRatio;
-      sX = (vW - sW) / 2;
-    } else {
-      sH = vW / targetRatio;
-      sY = (vH - sH) / 2;
-    }
-
-    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg');
-    
-    // หาจุดอ้างอิงบนภาพความละเอียดสูง
-    const markers = extractMarkers(ctx, canvas.width, canvas.height);
-    
-    if (markers.tl && markers.tr && markers.bl && markers.br) {
-      processImageInternal(dataUrl, canvas.width, canvas.height, ctx, markers);
-    } else {
-      alert("ไม่พบจุดอ้างอิงมุมสีดำทั้ง 4 จุด โปรดให้ทั้ง 4 มุมอยู่ในกรอบภาพแล้วลองใหม่");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (imageSource === 'camera' && stream && videoRef.current) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play()
-        .then(() => {
-          stableFramesCount.current = 0;
-          animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
-        })
-        .catch(e => console.error("Play error:", e));
-    }
-    return () => {
-      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
-    };
-  }, [imageSource, stream, checkAlignmentAndScan]);
-
-  // --- OMR Logic ด้วย Bilinear Interpolation ---
-  const processImageInternal = (sourceUrl, canvasWidth, canvasHeight, ctx, markers) => {
+  // --- OMR Logic (Bilinear Interpolation) คำนวณความเบี้ยว ---
+  const processImageInternal = useCallback((sourceUrl, canvasWidth, canvasHeight, ctx, markers) => {
     setIsProcessing(true);
     setScanResult(null);
     setScannedImageUrl(sourceUrl);
@@ -243,7 +125,6 @@ export default function App() {
       return;
     }
 
-    // ฟังก์ชันช่วยหาตำแหน่งสมมติ (x, y) จากพิกัดเปอร์เซ็นต์ u, v โดยอิงจากจุด 4 มุมของจริง
     const getInterpolatedPoint = (u, v) => {
       const topX = markers.tl.x + (markers.tr.x - markers.tl.x) * u;
       const topY = markers.tl.y + (markers.tr.y - markers.tl.y) * u;
@@ -258,8 +139,6 @@ export default function App() {
     const analyzePixels = () => {
       const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
       const data = imageData.data;
-
-      // รัศมีในการตรวจจับความดำรอบๆ จุดศูนย์กลาง
       const radius = Math.floor(canvasWidth * 0.018); 
 
       const checkBubble = (u, v) => {
@@ -272,14 +151,14 @@ export default function App() {
             if (j >= 0 && j < canvasWidth && i >= 0 && i < canvasHeight) {
               const idx = (i * canvasWidth + j) * 4;
               const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-              if (gray < 130) darkPixels++; // ความไวในการอ่านรอยดินสอ
+              if (gray < 130) darkPixels++;
               totalPixels++;
             }
           }
         }
         return {
           darkness: totalPixels > 0 ? darkPixels / totalPixels : 0,
-          box: { // ใช้สำหรับวาดกรอบผลลัพธ์
+          box: { 
             x: (center.x - radius) / canvasWidth,
             y: (center.y - radius) / canvasHeight,
             w: (radius * 2) / canvasWidth,
@@ -292,21 +171,12 @@ export default function App() {
       const detectedBoxes = Array(20).fill(null);
       let studentIdStr = "";
 
-      // ค่าความสัมพันธ์ U, V อิงจากไฟล์กระดาษคำตอบที่ให้มา 
-      // (แม่นยำมากเพราะคำนวณจากระยะห่างระหว่างจุดอ้างอิง 4 มุมเสมอ)
-      const U_LEFT = 0.145; 
-      const V_START = 0.225; 
-      const U_STEP = 0.052; 
-      const V_STEP = 0.051; 
-
+      const U_LEFT = 0.145; const V_START = 0.225; 
+      const U_STEP = 0.052; const V_STEP = 0.051; 
       const U_RIGHT = 0.490;
+      const U_ID = 0.730; const V_ID = 0.550;
+      const U_ID_STEP = 0.053; const V_ID_STEP = 0.046;
 
-      const U_ID = 0.730;
-      const V_ID = 0.550;
-      const U_ID_STEP = 0.053;
-      const V_ID_STEP = 0.046;
-
-      // 1. ตรวจคำตอบ (Q1-20)
       for (let q = 0; q < 20; q++) {
         let maxDarkness = 0;
         let selectedOption = null;
@@ -317,10 +187,8 @@ export default function App() {
         const v = isLeft ? V_START + (q * V_STEP) : V_START + ((q - 15) * V_STEP);
 
         for (let opt = 0; opt < 5; opt++) {
-          const u = baseU + (opt * U_STEP);
-          const result = checkBubble(u, v);
-          
-          if (result.darkness > maxDarkness && result.darkness > 0.10) { // 10% คือเกณฑ์ขั้นต่ำของการฝน
+          const result = checkBubble(baseU + (opt * U_STEP), v);
+          if (result.darkness > maxDarkness && result.darkness > 0.10) { 
             maxDarkness = result.darkness;
             selectedOption = opt;
             selectedBox = result.box;
@@ -330,16 +198,12 @@ export default function App() {
         detectedBoxes[q] = selectedBox;
       }
 
-      // 2. ตรวจรหัสนักเรียน
       for (let digit = 0; digit < 5; digit++) {
         let maxDarkness = 0;
         let selectedNumber = "?";
-        
         const u = U_ID + (digit * U_ID_STEP);
         for (let num = 0; num < 10; num++) {
-          const v = V_ID + (num * V_ID_STEP);
-          const result = checkBubble(u, v);
-          
+          const result = checkBubble(u, V_ID + (num * V_ID_STEP));
           if (result.darkness > maxDarkness && result.darkness > 0.10) {
             maxDarkness = result.darkness;
             selectedNumber = num.toString();
@@ -348,7 +212,6 @@ export default function App() {
         studentIdStr += selectedNumber;
       }
 
-      // 3. คิดคะแนน
       let score = 0;
       const details = [];
       const keys = answerKeyRef.current;
@@ -377,7 +240,100 @@ export default function App() {
     };
 
     setTimeout(analyzePixels, 100); 
-  };
+  }, [stopCamera]);
+
+  // --- ถ่ายภาพและเข้าสู่ระบบ OMR ---
+  const captureAndProcess = useCallback(() => {
+    if (!videoRef.current || isProcessingRef.current) return;
+    
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    canvas.width = 600; canvas.height = 800; 
+
+    const vW = video.videoWidth; const vH = video.videoHeight;
+    const vRatio = vW / vH; const targetRatio = canvas.width / canvas.height;
+
+    let sX = 0, sY = 0, sW = vW, sH = vH;
+    if (vRatio > targetRatio) {
+      sW = vH * targetRatio; sX = (vW - sW) / 2;
+    } else {
+      sH = vW / targetRatio; sY = (vH - sH) / 2;
+    }
+
+    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg');
+    const markers = extractMarkers(ctx, canvas.width, canvas.height);
+    
+    if (markers.tl && markers.tr && markers.bl && markers.br) {
+      processImageInternal(dataUrl, canvas.width, canvas.height, ctx, markers);
+    } else {
+      alert("ไม่พบจุดอ้างอิงสีดำทั้ง 4 มุม โปรดให้ 4 มุมอยู่ในกรอบภาพแล้วลองใหม่");
+    }
+  }, [processImageInternal]);
+
+  // --- วงจรเช็คภาพสด (Auto Scan) ---
+  const checkAlignmentAndScan = useCallback(() => {
+    if (!videoRef.current || isProcessingRef.current || !streamRef.current) {
+      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+      return;
+    }
+    const video = videoRef.current;
+    if (video.readyState !== 4) {
+      animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+      return;
+    }
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    canvas.width = 150; canvas.height = 200; // ลดขนาดให้คำนวณสดไวที่สุด
+    
+    const vW = video.videoWidth; const vH = video.videoHeight;
+    const targetRatio = canvas.width / canvas.height;
+    let sX = 0, sY = 0, sW = vW, sH = vH;
+    if ((vW / vH) > targetRatio) {
+      sW = vH * targetRatio; sX = (vW - sW) / 2;
+    } else {
+      sH = vW / targetRatio; sY = (vH - sH) / 2;
+    }
+
+    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
+    const markers = extractMarkers(ctx, canvas.width, canvas.height);
+    
+    setAlignedStatus({
+      tl: !!markers.tl, tr: !!markers.tr, bl: !!markers.bl, br: !!markers.br
+    });
+
+    if (markers.tl && markers.tr && markers.bl && markers.br) {
+      stableFramesCount.current++;
+      if (stableFramesCount.current > 6 && !answerKeyRef.current.includes(null)) {
+        stableFramesCount.current = 0;
+        captureAndProcess(); 
+        return; 
+      }
+    } else {
+      stableFramesCount.current = 0;
+    }
+
+    animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+  }, [captureAndProcess]);
+
+  // ตั้งค่าวิดีโอให้เล่นและเริ่ม Loop สแกนอัตโนมัติ
+  useEffect(() => {
+    if (imageSource === 'camera' && stream && videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play()
+        .then(() => {
+          stableFramesCount.current = 0;
+          animationFrameId.current = requestAnimationFrame(checkAlignmentAndScan);
+        })
+        .catch(e => console.error("Play error:", e));
+    }
+    return () => {
+      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+    };
+  }, [imageSource, stream, checkAlignmentAndScan]);
 
   const handleManualUpload = (e) => {
     const file = e.target.files[0];
@@ -388,20 +344,19 @@ export default function App() {
         const img = new Image();
         img.onload = () => {
           const canvas = document.createElement('canvas');
-          canvas.width = 600;
-          canvas.height = 800;
+          canvas.width = 600; canvas.height = 800;
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          
           const cropY = img.height * 0.16;
           const cropHeight = img.height * 0.84;
           
           ctx.drawImage(img, 0, cropY, img.width, cropHeight, 0, 0, canvas.width, canvas.height);
-          
           const markers = extractMarkers(ctx, canvas.width, canvas.height);
+          
           if (markers.tl && markers.tr && markers.bl && markers.br) {
+            setImageSource('file');
             processImageInternal(canvas.toDataURL('image/jpeg'), canvas.width, canvas.height, ctx, markers);
           } else {
-            alert("รูปภาพที่อัปโหลดไม่พบจุดอ้างอิง 4 มุมที่ชัดเจน");
+            alert("ภาพไม่ชัดเจน ไม่พบสี่เหลี่ยมสีดำ 4 มุมเพื่อใช้เป็นจุดอ้างอิง");
             setImageSource(null);
             startCamera();
           }
@@ -484,7 +439,7 @@ export default function App() {
         </div>
       ) : (
         <>
-          <div className="relative bg-gray-900 rounded-xl overflow-hidden shadow-inner max-w-sm mx-auto mb-6 aspect-[3/4] flex items-center justify-center">
+          <div className="relative bg-black rounded-xl overflow-hidden shadow-inner max-w-sm mx-auto mb-6 aspect-[3/4] flex items-center justify-center">
             
             {imageSource === 'camera' && stream ? (
               <>
@@ -492,14 +447,10 @@ export default function App() {
                 
                 {/* 4 โซนตีกรอบกว้างๆ ให้ผู้ใช้เล็งเข้าไป */}
                 <div className="absolute inset-0 pointer-events-none p-4">
-                  {/* กล่องซ้ายบน */}
-                  <div className={`absolute top-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tl ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
-                  {/* กล่องขวาบน */}
-                  <div className={`absolute top-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tr ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
-                  {/* กล่องซ้ายล่าง */}
-                  <div className={`absolute bottom-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.bl ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
-                  {/* กล่องขวาล่าง */}
-                  <div className={`absolute bottom-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.br ? 'border-green-500 bg-green-500/20 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute top-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tl ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute top-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.tr ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute bottom-[4%] left-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.bl ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
+                  <div className={`absolute bottom-[4%] right-[4%] w-[25%] h-[25%] border-2 rounded-xl transition-all ${alignedStatus.br ? 'border-green-500 bg-green-500/20' : 'border-red-400 border-dashed bg-red-500/5'}`}></div>
                 </div>
 
                 <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 z-20">
@@ -520,24 +471,31 @@ export default function App() {
                 )}
               </>
             ) : (
-              <div className="text-gray-400 flex flex-col items-center">
-                <CameraIcon className="w-16 h-16 mb-4 opacity-50" />
-                <p>เปิดกล้องไม่สำเร็จ หรือถูกปิดไป</p>
-                <button onClick={startCamera} className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg">เปิดกล้องใหม่</button>
+              <div className="text-gray-400 flex flex-col items-center p-8 text-center">
+                {cameraError ? (
+                  <>
+                    <XCircle className="w-16 h-16 mb-4 text-red-500 opacity-80" />
+                    <p className="text-red-400 mb-4">{cameraError}</p>
+                    <button onClick={startCamera} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">เปิดกล้องใหม่</button>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-12 h-12 text-indigo-400 animate-spin mb-4" />
+                    <p>กำลังเปิดกล้อง...</p>
+                  </>
+                )}
               </div>
             )}
           </div>
 
-          <div className="flex flex-col sm:flex-row justify-center space-y-3 sm:space-y-0 sm:space-x-4">
-            <div className="relative w-full sm:w-auto">
+          <div className="flex flex-col justify-center max-w-sm mx-auto">
+            <div className="relative w-full">
               <input type="file" accept="image/*" ref={fileInputRef} onChange={handleManualUpload} className="hidden" />
               <button onClick={() => fileInputRef.current.click()} className="w-full bg-white border-2 border-gray-300 hover:bg-gray-50 text-gray-700 font-bold py-3 px-8 rounded-lg transition flex items-center justify-center">
-                <Upload className="w-5 h-5 mr-2" />อัปโหลดจากเครื่อง
+                <Upload className="w-5 h-5 mr-2" />นำเข้าจากแกลเลอรี่
               </button>
             </div>
           </div>
-          
-          {cameraError && <p className="text-red-500 mt-4 text-sm">{cameraError}</p>}
         </>
       )}
     </div>
@@ -611,7 +569,7 @@ export default function App() {
               ))}
             </div>
 
-            <button onClick={() => { setActiveTab('scan'); startCamera(); }} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-8 rounded-lg shadow-md transition flex items-center justify-center text-lg">
+            <button onClick={() => { setActiveTab('scan'); }} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-8 rounded-lg shadow-md transition flex items-center justify-center text-lg">
               <CameraIcon className="w-6 h-6 mr-2" />สแกนแผ่นต่อไป
             </button>
           </div>
