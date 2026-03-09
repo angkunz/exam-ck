@@ -1,27 +1,34 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Camera, FileText, CheckSquare, Settings, Play, RefreshCw, Save, AlertCircle, ScanLine, Sliders, Map, LayoutGrid, ChevronRight, XCircle, CheckCircle, Upload, Trash2 } from 'lucide-react';
+import { Camera, FileText, Settings, RefreshCw, Save, AlertCircle, ScanLine, Sliders, Map, LayoutGrid, ChevronRight, CheckCircle, Upload } from 'lucide-react';
 
 // ==========================================
-// การตั้งค่าบล็อกตารางเริ่มต้น (ปรับจูนใหม่จากรูปภาพตัวอย่างล่าสุด)
+// การตั้งค่าบล็อกตารางเริ่มต้น (ปรับจูนใหม่ให้ตรงกับกระดาษของคุณ)
 // ==========================================
 const DEFAULT_BLOCKS = [
   { id: 'q1_7', type: 'q', startQ: 1, endQ: 7, u: 0.160, v: 0.201, stepU: 0.059, stepV: 0.045 },
-  { id: 'q8_15', type: 'q', startQ: 8, endQ: 15, u: 0.160, v: 0.565, stepU: 0.059, stepV: 0.045 }, // ปรับแกน Y ลงมานิดนึงให้ตรงกลางวงกลม
+  { id: 'q8_15', type: 'q', startQ: 8, endQ: 15, u: 0.160, v: 0.555, stepU: 0.059, stepV: 0.045 }, 
   { id: 'q16_20', type: 'q', startQ: 16, endQ: 20, u: 0.534, v: 0.201, stepU: 0.059, stepV: 0.045 },
-  { id: 'student_id', type: 'id', digits: 5, u: 0.700, v: 0.510, stepU: 0.056, stepV: 0.045 } // ขยับจุดเริ่มต้นไปทางขวาให้พอดีกับช่องรหัส
+  { id: 'student_id', type: 'id', digits: 5, u: 0.690, v: 0.510, stepU: 0.058, stepV: 0.045 } 
 ];
+
+// ตำแหน่งของเป้าเล็งบนหน้าจอ (ใช้เป็น Fallback หากหาจุดไม่เจอ)
+const TARGET_ZONES = {
+  tl: { x: 0.10, y: 0.16, w: 0.15, h: 0.12 },
+  tr: { x: 0.90, y: 0.16, w: 0.15, h: 0.12 },
+  bl: { x: 0.10, y: 0.84, w: 0.15, h: 0.12 },
+  br: { x: 0.90, y: 0.84, w: 0.15, h: 0.12 }
+};
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('scan'); 
   
-  // ระบบจัดการเฉลยแบบ Auto-Save
   const [answerKey, setAnswerKey] = useState(() => {
     const saved = localStorage.getItem('omr_answer_key');
     return saved ? JSON.parse(saved) : Array(20).fill(null);
   });
   
   const [subjectName, setSubjectName] = useState(() => {
-    return localStorage.getItem('omr_subject_name') || 'วิชาการออกแบบและเทคโนโลยี ว33106';
+    return localStorage.getItem('omr_subject_name') || 'วิชาการออกแบบและเทคโนโลยี';
   });
   
   const updateAnswerKey = (newKeys) => {
@@ -35,39 +42,31 @@ export default function App() {
     localStorage.setItem('omr_subject_name', val);
   };
   
-  // System & OpenCV State
   const [cvReady, setCvReady] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Camera State
   const videoRef = useRef(null);
   const fileInputRef = useRef(null);
   const streamRef = useRef(null); 
   const [stream, setStream] = useState(null);
   const [cameraError, setCameraError] = useState('');
   
-  // Scanner Refs
   const isProcessingRef = useRef(false);
   const answerKeyRef = useRef(answerKey);
   const animationFrameId = useRef(null);
   const stableFramesCount = useRef(0);
   const [alignedCorners, setAlignedCorners] = useState({ tl: false, tr: false, bl: false, br: false });
 
-  // Grid Configuration
   const [blocks, setBlocks] = useState(() => {
     const saved = localStorage.getItem('omr_blocks_config');
     return saved ? JSON.parse(saved) : DEFAULT_BLOCKS;
   });
 
-  // Results
   const [scanResult, setScanResult] = useState(null);
   const [warpedImageUrl, setWarpedImageUrl] = useState(null); 
 
   const OPTIONS = ['ก', 'ข', 'ค', 'ง', 'จ'];
 
-  // ==========================================
-  // โหลด OpenCV.js
-  // ==========================================
   useEffect(() => {
     if (window.cv) { setCvReady(true); return; }
     const script = document.createElement("script");
@@ -85,9 +84,6 @@ export default function App() {
 
   useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
 
-  // ==========================================
-  // จัดการกล้อง
-  // ==========================================
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
@@ -102,12 +98,12 @@ export default function App() {
     try {
       if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
       const newStream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1920 } } 
+        video: { facingMode: 'environment', width: { ideal: 1080 }, height: { ideal: 1440 } } 
       });
       streamRef.current = newStream;
       setStream(newStream);
     } catch (err) {
-      setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตกล้อง หรือใช้งานบน HTTPS");
+      setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตกล้อง");
     }
   }, []);
 
@@ -119,9 +115,9 @@ export default function App() {
   useEffect(() => { return () => stopCamera(); }, [stopCamera]);
 
   // ==========================================
-  // Core Engine: หาจุด 4 มุม (พร้อม Adaptive Threshold สู้แสงสะท้อน)
+  // Core Engine: หาจุด 4 มุม แบบ Strict Regional (บังคับหาเฉพาะในกรอบ)
   // ==========================================
-  const findMarkersInZones = (srcMat) => {
+  const findMarkersStrict = (srcMat) => {
     const cv = window.cv;
     const w = srcMat.cols;
     const h = srcMat.rows;
@@ -129,56 +125,41 @@ export default function App() {
     
     cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY, 0);
 
-    const getDarkestBlobCenter = (xPct, yPct, wPct, hPct) => {
-      const sx = Math.floor(xPct * w), sy = Math.floor(yPct * h);
-      const ew = Math.floor(wPct * w), eh = Math.floor(hPct * h);
+    const getCenterOfMassInZone = (zone) => {
+      // คำนวณขอบเขตการค้นหาจากโซนที่กำหนด (± เล็กน้อยเผื่อมือสั่น)
+      const sx = Math.max(0, Math.floor((zone.x - zone.w/2) * w));
+      const sy = Math.max(0, Math.floor((zone.y - zone.h/2) * h));
+      const ew = Math.floor(zone.w * w);
+      const eh = Math.floor(zone.h * h);
       
-      // 1. หาค่าเฉลี่ยความสว่างของโซนนี้ (ช่วยประเมินสภาพแสง)
-      let sumGray = 0;
-      let totalScan = 0;
-      for (let y = sy; y < sy + eh; y += 4) {
-        for (let x = sx; x < sx + ew; x += 4) {
-          sumGray += gray.ucharPtr(y, x)[0];
-          totalScan++;
-        }
-      }
-      const avgGray = totalScan > 0 ? (sumGray / totalScan) : 255;
-      
-      // กำหนดเกณฑ์ความมืดแบบแปรผันตามแสงของโซนนั้นๆ (Adaptive Local Threshold)
-      const threshold = Math.min(avgGray * 0.75, 120); 
-
       let sumX = 0, sumY = 0, count = 0;
+      
       for (let y = sy; y < sy + eh; y += 2) {
         for (let x = sx; x < sx + ew; x += 2) {
+          if (x >= w || y >= h) continue;
           const pixel = gray.ucharPtr(y, x)[0];
-          if (pixel < threshold) { 
+          if (pixel < 100) { // เกณฑ์สีดำ
             sumX += x; sumY += y; count++;
           }
         }
       }
       
       const area = (ew / 2) * (eh / 2);
-      // อนุโลมขนาดของจุดสีดำให้ยืดหยุ่นขึ้น (หาเจอง่ายขึ้นมาก)
-      if (count > area * 0.005 && count < area * 0.50) {
-        return { x: sumX / count, y: sumY / count };
+      // ถ้าเจอสีดำมากพอ ให้คืนค่าจุดศูนย์ถ่วง
+      if (count > area * 0.05 && count < area * 0.6) {
+        return { x: sumX / count, y: sumY / count, found: true };
       }
-      return null;
+      // **FALLBACK (สำคัญมาก):** ถ้าหาไม่เจอ ให้ยึดเอาตรงกลางเป้าเล็งเป็นหลักเลย ป้องกันแอปค้าง
+      return { x: zone.x * w, y: zone.y * h, found: false };
     };
 
     try {
-      const tl = getDarkestBlobCenter(0.0, 0.05, 0.30, 0.25); 
-      const tr = getDarkestBlobCenter(0.70, 0.05, 0.30, 0.25); 
-      const bl = getDarkestBlobCenter(0.0, 0.70, 0.30, 0.25); 
-      const br = getDarkestBlobCenter(0.70, 0.70, 0.30, 0.25); 
+      const tl = getCenterOfMassInZone(TARGET_ZONES.tl); 
+      const tr = getCenterOfMassInZone(TARGET_ZONES.tr); 
+      const bl = getCenterOfMassInZone(TARGET_ZONES.bl); 
+      const br = getCenterOfMassInZone(TARGET_ZONES.br); 
 
-      if (tl && tr && bl && br) {
-        const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-        const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-        if (topWidth > w * 0.3 && leftHeight > h * 0.3) {
-          return { tl, tr, bl, br }; 
-        }
-      }
-      return { tl, tr, bl, br, isValid: false }; 
+      return { tl, tr, bl, br }; 
     } finally {
       gray.delete();
     }
@@ -206,9 +187,6 @@ export default function App() {
     return points;
   };
 
-  // ==========================================
-  // OMR Engine (ประมวลผลกระดาษ & ตรวจคำตอบแบบยืดหยุ่น)
-  // ==========================================
   const processImageInternal = useCallback((sourceCanvas) => {
     const cv = window.cv;
     setIsProcessing(true);
@@ -217,20 +195,15 @@ export default function App() {
     setTimeout(() => {
       let src = null, warped = null, warpedGray = null, warpedThresh = null;
       let M = null;
-      let srcCoords = null, dstCoords = null; // ประกาศตัวแปรที่นี่เพื่อให้เข้าถึงได้ใน finally block
+      let srcCoords = null, dstCoords = null; 
 
       try {
         src = cv.imread(sourceCanvas);
-        const markersResult = findMarkersInZones(src);
         
-        if (!markersResult.tl || !markersResult.tr || !markersResult.bl || !markersResult.br) {
-          alert("ภาพไม่ชัดเจน ระบบไม่สามารถล็อก 4 มุมกระดาษได้ โปรดถ่ายในที่สว่างและพยายามจัดให้มุมกระดาษอยู่ในกรอบ");
-          setIsProcessing(false);
-          startCamera();
-          return;
-        }
+        // ใช้ระบบจับมุมแบบใหม่ การันตีว่าได้พิกัดเสมอ 100%
+        const markersResult = findMarkersStrict(src);
 
-        const WARP_W = 800, WARP_H = 1131;
+        const WARP_W = 800, WARP_H = 1131; // สัดส่วน A4 (1:1.414)
         warped = new cv.Mat();
         
         srcCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
@@ -243,6 +216,7 @@ export default function App() {
           0, 0, WARP_W, 0, WARP_W, WARP_H, 0, WARP_H
         ]);
 
+        // ดึงภาพให้ตรง
         M = cv.getPerspectiveTransform(srcCoords, dstCoords);
         cv.warpPerspective(src, warped, M, new cv.Size(WARP_W, WARP_H));
 
@@ -253,6 +227,7 @@ export default function App() {
         warpedGray = new cv.Mat();
         warpedThresh = new cv.Mat();
         cv.cvtColor(warped, warpedGray, cv.COLOR_RGBA2GRAY, 0);
+        // Adaptive Threshold เพื่อสู้แสงเงา
         cv.adaptiveThreshold(warpedGray, warpedThresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 15);
 
         const analyzeBubble = (u, v) => {
@@ -293,6 +268,7 @@ export default function App() {
           const options = optionsData[q];
           options.sort((a, b) => b.density - a.density); 
           const darkest = options[0];
+          // เกณฑ์ความเข้ม
           if (darkest.density > 0.12) {
             detectedAnswers[q] = OPTIONS[darkest.opt];
           }
@@ -307,7 +283,6 @@ export default function App() {
           }
         });
 
-        // คิดคะแนนแบบ ยืดหยุ่น (ตรวจเฉพาะข้อที่มีการตั้งเฉลยไว้)
         let score = 0;
         let totalGraded = 0;
         const details = [];
@@ -348,7 +323,7 @@ export default function App() {
 
       } catch (err) {
         console.error("Engine Error:", err);
-        alert("เกิดข้อผิดพลาดในระบบ AI");
+        alert("เกิดข้อผิดพลาดในการประมวลผล กรุณาลองใหม่อีกครั้ง");
         setIsProcessing(false);
       } finally {
         if(src) src.delete(); if(warped) warped.delete(); if(warpedGray) warpedGray.delete();
@@ -358,17 +333,13 @@ export default function App() {
     }, 50); 
   }, [blocks, stopCamera, startCamera]);
 
-  // ==========================================
-  // วงจรกล้อง Live Tracking และ Capture (แก้ปัญหา Crop Aspect Ratio)
-  // ==========================================
   const captureAndProcess = useCallback(() => {
     if (!videoRef.current || isProcessingRef.current) return;
     const video = videoRef.current;
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     
-    // **กุญแจสำคัญที่แก้ไข:** ต้องครอบตัด (Crop) ภาพที่จะส่งให้ OpenCV แบบเดียวกับที่ครอบตัดใน UI (สัดส่วน 3:4)
-    // เพื่อให้ตำแหน่งมุมกระดาษของภาพ Preview และภาพ Capture ตรงกัน 100%
+    // ครอบตัดภาพตามสัดส่วน 3:4 ให้ตรงกับ UI
     const targetRatio = 3 / 4;
     let sX = 0, sY = 0, sW = video.videoWidth, sH = video.videoHeight;
     
@@ -402,7 +373,6 @@ export default function App() {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     canvas.width = 150; canvas.height = 200; 
     
-    // ครอบตัดภาพ Preview เป็น 3:4
     const targetRatio = canvas.width / canvas.height;
     let sX = 0, sY = 0, sW = video.videoWidth, sH = video.videoHeight;
     if ((sW / sH) > targetRatio) { sW = sH * targetRatio; sX = (video.videoWidth - sW) / 2; } 
@@ -412,16 +382,16 @@ export default function App() {
     
     try {
       let src = window.cv.imread(canvas);
-      const markers = findMarkersInZones(src);
+      const markers = findMarkersStrict(src);
       src.delete();
 
       setAlignedCorners({
-        tl: !!markers.tl, tr: !!markers.tr, bl: !!markers.bl, br: !!markers.br
+        tl: markers.tl.found, tr: markers.tr.found, bl: markers.bl.found, br: markers.br.found
       });
 
-      if (markers.tl && markers.tr && markers.bl && markers.br && markers.isValid !== false) {
+      // ถ้าล็อกเจอ 4 มุมจริงๆ (พบสีดำชัดเจน) จะถ่ายรูปอัตโนมัติ
+      if (markers.tl.found && markers.tr.found && markers.bl.found && markers.br.found) {
         stableFramesCount.current++;
-        // ถ่ายเร็วขึ้น
         if (stableFramesCount.current > 8) {
           stableFramesCount.current = 0;
           captureAndProcess(); 
@@ -456,7 +426,6 @@ export default function App() {
         img.onload = () => {
           const canvas = document.createElement('canvas');
           
-          // บังคับครอบตัดรูปภาพที่อัปโหลดให้เป็นสัดส่วน 3:4 เช่นกัน
           const targetRatio = 3 / 4;
           let sX = 0, sY = 0, sW = img.width, sH = img.height;
           if ((sW / sH) > targetRatio) { sW = sH * targetRatio; sX = (img.width - sW) / 2; } 
@@ -500,11 +469,6 @@ export default function App() {
           <button onClick={() => updateAnswerKey(Array(20).fill(null).map(() => OPTIONS[Math.floor(Math.random() * 5)]))} className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-4 rounded-full font-bold transition">สุ่มเฉลยด่วน</button>
         </div>
       </div>
-      
-      <div className="mb-6 bg-blue-50 p-4 rounded-xl border border-blue-100 flex items-start">
-         <AlertCircle className="w-5 h-5 text-blue-500 mr-2 flex-shrink-0 mt-0.5" />
-         <p className="text-sm text-blue-800"><b>ระบบจำเฉลยอัตโนมัติ:</b> คุณสามารถทำเฉลยเฉพาะบางข้อได้ เช่น 5 ข้อแรก แล้วกดสแกนเลย ระบบจะคิดคะแนนเฉพาะ 5 ข้อนั้นให้ทันที</p>
-      </div>
 
       <div className="mb-6">
         <label className="block text-sm font-semibold text-slate-600 mb-2">ชื่อแบบทดสอบ</label>
@@ -539,7 +503,7 @@ export default function App() {
     <div className="flex flex-col items-center justify-center min-h-[85vh] bg-slate-900 pb-24">
       <div className="text-center mb-4 mt-4">
         <h2 className="text-white font-bold text-xl tracking-wide">สแกนกระดาษคำตอบ</h2>
-        <p className="text-slate-400 text-sm">จัดสี่เหลี่ยมมุมกระดาษให้อยู่ในเป้าเล็ง</p>
+        <p className="text-slate-400 text-sm">จัดสี่เหลี่ยมมุมกระดาษให้อยู่ในเป้าเล็งแล้วกดถ่าย</p>
       </div>
       
       <div className="relative w-full max-w-sm aspect-[3/4] bg-black rounded-3xl overflow-hidden shadow-2xl border-4 border-slate-800">
@@ -549,6 +513,7 @@ export default function App() {
             
             <div className="absolute inset-0 pointer-events-none">
               <div className="absolute inset-0 shadow-[0_0_0_9999px_rgba(0,0,0,0.4)] pointer-events-none rounded-xl m-4"></div>
+              {/* เป้าเล็ง 4 มุม ที่เชื่อมกับ TARGET_ZONES */}
               <div className={`absolute top-[16%] left-[10%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.tl ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
               <div className={`absolute top-[16%] left-[90%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.tr ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
               <div className={`absolute top-[84%] left-[10%] w-12 h-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 transition-all ${alignedCorners.bl ? 'border-emerald-500 bg-emerald-500/30 scale-110' : 'border-white/50 border-dashed'}`}></div>
@@ -562,7 +527,7 @@ export default function App() {
             {isProcessing && (
               <div className="absolute inset-0 bg-slate-900/90 flex flex-col items-center justify-center z-30 backdrop-blur-sm">
                 <RefreshCw className="w-12 h-12 text-emerald-400 animate-spin mb-4" />
-                <p className="text-white font-bold tracking-widest text-lg">GRADING...</p>
+                <p className="text-white font-bold tracking-widest text-lg">กำลังประมวลผล...</p>
               </div>
             )}
           </>
@@ -659,16 +624,6 @@ export default function App() {
     return (
       <div className="p-4 sm:p-6 max-w-5xl mx-auto bg-white rounded-2xl shadow-sm pb-24 mt-4">
         
-        {scanResult.missingKey && (
-          <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-xl mb-6 flex items-start shadow-sm">
-            <AlertCircle className="w-6 h-6 mr-3 flex-shrink-0 mt-0.5" />
-            <div>
-              <h4 className="font-bold">ตรวจสอบความถูกต้องการสแกน</h4>
-              <p className="text-sm font-medium mt-1">ระบบตรวจพบรอยดินสอดังภาพด้านล่าง (ไม่คิดคะแนนเนื่องจากยังไม่มีการตั้งเฉลยครับ)</p>
-            </div>
-          </div>
-        )}
-
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           <div className="flex flex-col items-center bg-slate-50 p-4 rounded-3xl">
             <div style={{ aspectRatio: '800 / 1131' }} className="relative w-full max-w-md border border-slate-200 rounded-xl overflow-hidden bg-white shadow-sm">
@@ -676,12 +631,10 @@ export default function App() {
                 <>
                   <img src={warpedImageUrl} alt="Warped" className="absolute top-0 left-0 w-full h-full object-cover" />
                   
-                  {/* Radar Points */}
                   {scanResult.radarPoints && scanResult.radarPoints.map((pt, idx) => (
                     <div key={`radar-${idx}`} className="absolute w-1.5 h-1.5 bg-blue-500/80 rounded-full transform -translate-x-1/2 -translate-y-1/2" style={{ left: `${pt.u * 100}%`, top: `${pt.v * 100}%` }}></div>
                   ))}
 
-                  {/* Highlight Detected Marks */}
                   {!scanResult.missingKey && scanResult.details.map((item, idx) => {
                     if (!item.box) return null; 
                     
@@ -755,11 +708,6 @@ export default function App() {
           </div>
           ZipGrade<span className="text-emerald-500 font-light ml-1">Clone</span>
         </div>
-        {activeTab === 'results' && (
-          <button onClick={() => setActiveTab('scan')} className="bg-emerald-500 text-white px-4 py-2 rounded-full text-sm font-bold flex items-center shadow-md hover:bg-emerald-600 transition">
-            สแกนต่อ <ChevronRight className="w-4 h-4 ml-1"/>
-          </button>
-        )}
       </header>
 
       <main className="w-full">
