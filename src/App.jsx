@@ -21,6 +21,14 @@ export default function App() {
   const OPTIONS = ['ก', 'ข', 'ค', 'ง', 'จ'];
   const NUM_QUESTIONS = 20;
 
+  // เพิ่ม useEffect ตัวนี้เข้าไป เพื่อรอให้แท็กวิดีโอสร้างเสร็จก่อนแล้วค่อยใส่ภาพจากกล้อง
+  useEffect(() => {
+    if (imageSource === 'camera' && stream && videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(e => console.error("Play error:", e));
+    }
+  }, [imageSource, stream]);
+
   // --- 1. Camera Handling ---
   const startCamera = async () => {
     setCameraError('');
@@ -33,10 +41,6 @@ export default function App() {
       });
       setStream(newStream);
       setImageSource('camera');
-      if (videoRef.current) {
-        videoRef.current.srcObject = newStream;
-        videoRef.current.play();
-      }
     } catch (err) {
       console.error("Error accessing camera:", err);
       setCameraError("ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้งานกล้อง หรืออัปโหลดรูปภาพแทน");
@@ -366,6 +370,7 @@ export default function App() {
                   ref={videoRef} 
                   autoPlay 
                   playsInline 
+                  muted
                   className="w-full h-full object-cover"
                 />
                 {/* Alignment Guide Overlay */}
