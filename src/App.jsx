@@ -2,13 +2,13 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Camera, FileText, CheckSquare, Settings, Play, RefreshCw, Save, AlertCircle, ScanLine, Sliders, Map, LayoutGrid, ChevronRight, XCircle, CheckCircle, Upload, Trash2 } from 'lucide-react';
 
 // ==========================================
-// การตั้งค่าบล็อกตารางเริ่มต้น (แยกเป็นโซนๆ แก้ปัญหาการเว้นบรรทัด)
+// การตั้งค่าบล็อกตารางเริ่มต้น (ปรับจูนใหม่จากรูปภาพตัวอย่างล่าสุด)
 // ==========================================
 const DEFAULT_BLOCKS = [
   { id: 'q1_7', type: 'q', startQ: 1, endQ: 7, u: 0.160, v: 0.201, stepU: 0.059, stepV: 0.045 },
-  { id: 'q8_15', type: 'q', startQ: 8, endQ: 15, u: 0.160, v: 0.555, stepU: 0.059, stepV: 0.045 },
+  { id: 'q8_15', type: 'q', startQ: 8, endQ: 15, u: 0.160, v: 0.565, stepU: 0.059, stepV: 0.045 }, // ปรับแกน Y ลงมานิดนึงให้ตรงกลางวงกลม
   { id: 'q16_20', type: 'q', startQ: 16, endQ: 20, u: 0.534, v: 0.201, stepU: 0.059, stepV: 0.045 },
-  { id: 'student_id', type: 'id', digits: 5, u: 0.681, v: 0.510, stepU: 0.058, stepV: 0.045 }
+  { id: 'student_id', type: 'id', digits: 5, u: 0.700, v: 0.510, stepU: 0.056, stepV: 0.045 } // ขยับจุดเริ่มต้นไปทางขวาให้พอดีกับช่องรหัส
 ];
 
 export default function App() {
@@ -26,7 +26,7 @@ export default function App() {
   
   const updateAnswerKey = (newKeys) => {
     setAnswerKey(newKeys);
-    answerKeyRef.current = newKeys; // อัปเดต Ref ทันทีป้องกันปัญหา Sync
+    answerKeyRef.current = newKeys; 
     localStorage.setItem('omr_answer_key', JSON.stringify(newKeys));
   };
 
@@ -84,7 +84,6 @@ export default function App() {
   }, []);
 
   useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
-  // ไม่ต้องใช้ useEffect เพื่ออัปเดต answerKeyRef แล้วเพราะทำในฟังก์ชัน updateAnswerKey โดยตรง
 
   // ==========================================
   // จัดการกล้อง
@@ -120,7 +119,7 @@ export default function App() {
   useEffect(() => { return () => stopCamera(); }, [stopCamera]);
 
   // ==========================================
-  // Core Engine: หาจุด 4 มุม เฉพาะในกรอบเป้าหมาย (Viewfinder)
+  // Core Engine: หาจุด 4 มุม (พร้อม Adaptive Threshold สู้แสงสะท้อน)
   // ==========================================
   const findMarkersInZones = (srcMat) => {
     const cv = window.cv;
@@ -134,29 +133,39 @@ export default function App() {
       const sx = Math.floor(xPct * w), sy = Math.floor(yPct * h);
       const ew = Math.floor(wPct * w), eh = Math.floor(hPct * h);
       
-      let sumX = 0, sumY = 0, count = 0;
+      // 1. หาค่าเฉลี่ยความสว่างของโซนนี้ (ช่วยประเมินสภาพแสง)
+      let sumGray = 0;
+      let totalScan = 0;
+      for (let y = sy; y < sy + eh; y += 4) {
+        for (let x = sx; x < sx + ew; x += 4) {
+          sumGray += gray.ucharPtr(y, x)[0];
+          totalScan++;
+        }
+      }
+      const avgGray = totalScan > 0 ? (sumGray / totalScan) : 255;
       
+      // กำหนดเกณฑ์ความมืดแบบแปรผันตามแสงของโซนนั้นๆ (Adaptive Local Threshold)
+      const threshold = Math.min(avgGray * 0.75, 120); 
+
+      let sumX = 0, sumY = 0, count = 0;
       for (let y = sy; y < sy + eh; y += 2) {
         for (let x = sx; x < sx + ew; x += 2) {
           const pixel = gray.ucharPtr(y, x)[0];
-          // ปรับเกณฑ์ความดำ (Threshold) ให้อ่อนลง เพื่อจับมุมได้ง่ายขึ้นในที่แสงน้อย
-          if (pixel < 100) { 
+          if (pixel < threshold) { 
             sumX += x; sumY += y; count++;
           }
         }
       }
       
       const area = (ew / 2) * (eh / 2);
-      // ลดเกณฑ์ขั้นต่ำของการเจอสีดำลงเหลือ 1% (เดิม 2%) เผื่อกระดาษอยู่ไกล
-      // เพิ่มเกณฑ์สูงสุดเป็น 60% (เดิม 40%) เผื่อแสงเงาพาดผ่านมุมกระดาษ
-      if (count > area * 0.01 && count < area * 0.60) {
+      // อนุโลมขนาดของจุดสีดำให้ยืดหยุ่นขึ้น (หาเจอง่ายขึ้นมาก)
+      if (count > area * 0.005 && count < area * 0.50) {
         return { x: sumX / count, y: sumY / count };
       }
       return null;
     };
 
     try {
-      // ขยายพื้นที่โซนค้นหาให้กว้างขึ้นอีกนิด เพื่อให้เล็งง่ายขึ้น
       const tl = getDarkestBlobCenter(0.0, 0.05, 0.30, 0.25); 
       const tr = getDarkestBlobCenter(0.70, 0.05, 0.30, 0.25); 
       const bl = getDarkestBlobCenter(0.0, 0.70, 0.30, 0.25); 
@@ -165,7 +174,6 @@ export default function App() {
       if (tl && tr && bl && br) {
         const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
         const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-        // ลดเกณฑ์ความกว้างความสูงของรูปสี่เหลี่ยมลง เผื่อผู้ใช้ถือกล้องใกล้/ไกล
         if (topWidth > w * 0.3 && leftHeight > h * 0.3) {
           return { tl, tr, bl, br }; 
         }
@@ -209,6 +217,7 @@ export default function App() {
     setTimeout(() => {
       let src = null, warped = null, warpedGray = null, warpedThresh = null;
       let M = null;
+      let srcCoords = null, dstCoords = null; // ประกาศตัวแปรที่นี่เพื่อให้เข้าถึงได้ใน finally block
 
       try {
         src = cv.imread(sourceCanvas);
@@ -224,13 +233,13 @@ export default function App() {
         const WARP_W = 800, WARP_H = 1131;
         warped = new cv.Mat();
         
-        let srcCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        srcCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
           markersResult.tl.x, markersResult.tl.y, 
           markersResult.tr.x, markersResult.tr.y, 
           markersResult.br.x, markersResult.br.y, 
           markersResult.bl.x, markersResult.bl.y
         ]);
-        let dstCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        dstCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
           0, 0, WARP_W, 0, WARP_W, WARP_H, 0, WARP_H
         ]);
 
@@ -303,10 +312,10 @@ export default function App() {
         let totalGraded = 0;
         const details = [];
         const keys = answerKeyRef.current;
-        const isKeyEmpty = keys.every(k => k === null); // เช็คว่าไม่ได้ตั้งเฉลยเลยแม้แต่ข้อเดียว
+        const isKeyEmpty = keys.every(k => k === null); 
         
         for (let i = 0; i < 20; i++) {
-          const isGraded = keys[i] !== null; // ข้อนี้ถูกตั้งเฉลยไว้หรือไม่
+          const isGraded = keys[i] !== null; 
           let isCorrect = false;
 
           if (isGraded) {
@@ -323,22 +332,14 @@ export default function App() {
           }
           
           details.push({ 
-            qNumber: i + 1, 
-            studentAns: detectedAnswers[i], 
-            correctAns: keys[i] || '-', 
-            isCorrect, 
-            box,
-            isGraded // ส่ง state ว่าข้อนี้ถูกนำมาคิดคะแนนไหม ไปให้ UI ด้วย
+            qNumber: i + 1, studentAns: detectedAnswers[i], correctAns: keys[i] || '-', 
+            isCorrect, box, isGraded 
           });
         }
 
         setScanResult({
-          studentId: idValues.join(''), 
-          score, 
-          total: totalGraded,  // เอาเฉพาะจำนวนข้อที่ตรวจ
-          details, 
-          radarPoints: points, 
-          missingKey: isKeyEmpty 
+          studentId: idValues.join(''), score, total: totalGraded, details, 
+          radarPoints: points, missingKey: isKeyEmpty 
         });
         
         setIsProcessing(false);
@@ -358,15 +359,31 @@ export default function App() {
   }, [blocks, stopCamera, startCamera]);
 
   // ==========================================
-  // วงจรกล้อง Live Tracking
+  // วงจรกล้อง Live Tracking และ Capture (แก้ปัญหา Crop Aspect Ratio)
   // ==========================================
   const captureAndProcess = useCallback(() => {
     if (!videoRef.current || isProcessingRef.current) return;
     const video = videoRef.current;
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    canvas.width = video.videoWidth; canvas.height = video.videoHeight; 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // **กุญแจสำคัญที่แก้ไข:** ต้องครอบตัด (Crop) ภาพที่จะส่งให้ OpenCV แบบเดียวกับที่ครอบตัดใน UI (สัดส่วน 3:4)
+    // เพื่อให้ตำแหน่งมุมกระดาษของภาพ Preview และภาพ Capture ตรงกัน 100%
+    const targetRatio = 3 / 4;
+    let sX = 0, sY = 0, sW = video.videoWidth, sH = video.videoHeight;
+    
+    if ((sW / sH) > targetRatio) { 
+      sW = sH * targetRatio; 
+      sX = (video.videoWidth - sW) / 2; 
+    } else { 
+      sH = sW / targetRatio; 
+      sY = (video.videoHeight - sH) / 2; 
+    }
+
+    canvas.width = sW; 
+    canvas.height = sH; 
+    ctx.drawImage(video, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
+    
     processImageInternal(canvas);
   }, [processImageInternal]);
 
@@ -385,6 +402,7 @@ export default function App() {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     canvas.width = 150; canvas.height = 200; 
     
+    // ครอบตัดภาพ Preview เป็น 3:4
     const targetRatio = canvas.width / canvas.height;
     let sX = 0, sY = 0, sW = video.videoWidth, sH = video.videoHeight;
     if ((sW / sH) > targetRatio) { sW = sH * targetRatio; sX = (video.videoWidth - sW) / 2; } 
@@ -403,6 +421,7 @@ export default function App() {
 
       if (markers.tl && markers.tr && markers.bl && markers.br && markers.isValid !== false) {
         stableFramesCount.current++;
+        // ถ่ายเร็วขึ้น
         if (stableFramesCount.current > 8) {
           stableFramesCount.current = 0;
           captureAndProcess(); 
@@ -436,12 +455,21 @@ export default function App() {
         const img = new Image();
         img.onload = () => {
           const canvas = document.createElement('canvas');
+          
+          // บังคับครอบตัดรูปภาพที่อัปโหลดให้เป็นสัดส่วน 3:4 เช่นกัน
+          const targetRatio = 3 / 4;
+          let sX = 0, sY = 0, sW = img.width, sH = img.height;
+          if ((sW / sH) > targetRatio) { sW = sH * targetRatio; sX = (img.width - sW) / 2; } 
+          else { sH = sW / targetRatio; sY = (img.height - sH) / 2; }
+
           const MAX_WIDTH = 1200;
-          let w = img.width; let h = img.height;
+          let w = sW, h = sH;
           if (w > MAX_WIDTH) { h = Math.floor(h * (MAX_WIDTH / w)); w = MAX_WIDTH; }
+          
           canvas.width = w; canvas.height = h; 
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          ctx.drawImage(img, 0, 0, w, h);
+          ctx.drawImage(img, sX, sY, sW, sH, 0, 0, w, h);
+          
           processImageInternal(canvas);
         };
         img.src = event.target.result;
